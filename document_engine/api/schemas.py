@@ -19,6 +19,11 @@ class AnalyzeResponse(BaseModel):
     score: float
     valid: bool
     variant_detected: str | None
+    variant_score: float
+    threshold: float
+    matched_weight_sum: float
+    total_weight_sum: float
+    missing_elements: list[str]
     elements_found: list[ElementFound]
     ocr_used: bool
     processing_time_ms: int
