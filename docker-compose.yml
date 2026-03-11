@@ -12,6 +12,7 @@ services:
       fi'
     environment:
       NODE_ENV: development
+      DOCUMENT_ENGINE_URL: http://document_engine:8090
     volumes:
       - ./:/app
     ports:

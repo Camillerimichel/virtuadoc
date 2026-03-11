@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from document_engine.types import LayoutZone, TextBlock
+from document_engine.model_types import LayoutZone, TextBlock
 
 
 class LayoutParser:

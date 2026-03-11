@@ -1,0 +1,45 @@
+item: kbis
+language: fr
+template: contract
+threshold: 0.7
+required_elements:
+- name: immatriculation
+  weight: 1
+- name: personne
+  weight: 1
+- name: morale
+  weight: 1
+- name: activite
+  weight: 1
+- name: etablissement
+  weight: 1
+- name: principal
+  weight: 1
+variants:
+- kbis_v1
+variant_signatures:
+- name: kbis_v1
+  page_count: 2
+  dominant_keywords:
+  - libourne
+  - rue
+  - gestion
+  - date
+  - social
+  - code
+  - controle
+  - extrait
+  - immatriculation
+  - activités
+  - argonne
+  - analyse
+  table_presence: false
+  title_patterns:
+  - IDENTIFICATION DE LA PERSONNE MORALE
+  - GESTION, DIRECTION, ADMINISTRATION, CONTROLE, ASSOCIES OU MEMBRES
+  - RENSEIGNEMENTS RELATIFS A L'ACTIVITE ET A L'ETABLISSEMENT PRINCIPAL
+  - FIN DE L'EXTRAIT
+audit:
+  sample_count: 5
+  page_distribution:
+    2: 5

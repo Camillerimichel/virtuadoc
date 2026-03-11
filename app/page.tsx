@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -31,8 +32,37 @@ type AnalyzeResponse = {
 };
 
 type Tab = "analyze" | "config" | "training";
-
 type ConfigKind = "item" | "template" | "global";
+
+type RequiredElement = {
+  name: string;
+  weight: number;
+};
+
+type VariantSignature = {
+  name: string;
+  page_count: number;
+  dominant_keywords: string[];
+  table_presence: boolean;
+  title_patterns: string[];
+};
+
+type ItemConfig = {
+  item: string;
+  language: string;
+  template: string;
+  threshold: number;
+  required_elements: RequiredElement[];
+  variants: string[];
+  variant_signatures: VariantSignature[];
+};
+
+type TrainingBuildResponse = {
+  status: string;
+  item: string;
+  saved_to: string;
+  config: ItemConfig;
+};
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -56,6 +86,18 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+function emptyItemConfig(itemName: string): ItemConfig {
+  return {
+    item: itemName,
+    language: "fr",
+    template: "contract",
+    threshold: 0.7,
+    required_elements: [],
+    variants: [],
+    variant_signatures: [],
+  };
+}
+
 export default function Home() {
   const [tab, setTab] = useState<Tab>("analyze");
 
@@ -73,12 +115,21 @@ export default function Home() {
   const [configText, setConfigText] = useState("{}");
   const [configMessage, setConfigMessage] = useState<string | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
+  const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
+
+  const [guidedItemName, setGuidedItemName] = useState("contrat_assurance_vie");
+  const [guidedItemConfig, setGuidedItemConfig] = useState<ItemConfig | null>(null);
+  const [guidedBusy, setGuidedBusy] = useState(false);
+  const [guidedMessage, setGuidedMessage] = useState<string | null>(null);
 
   const [trainingItem, setTrainingItem] = useState("nouvel_item");
   const [trainingTemplate, setTrainingTemplate] = useState("contract");
   const [trainingFiles, setTrainingFiles] = useState<File[]>([]);
   const [trainingBusy, setTrainingBusy] = useState(false);
   const [trainingMessage, setTrainingMessage] = useState<string | null>(null);
+  const [trainingTrace, setTrainingTrace] = useState<string[]>([]);
+  const [trainingResult, setTrainingResult] = useState<TrainingBuildResponse | null>(null);
+  const trainingInputRef = useRef<HTMLInputElement | null>(null);
 
   const scorePercent = useMemo(() => {
     if (!result) return 0;
@@ -102,6 +153,32 @@ export default function Home() {
   useEffect(() => {
     refreshLists().catch(() => undefined);
   }, [refreshLists]);
+
+  useEffect(() => {
+    if (items.length > 0 && !items.includes(guidedItemName)) {
+      setGuidedItemName(items[0]);
+    }
+  }, [items, guidedItemName]);
+
+  useEffect(() => {
+    if (configKind === "global") {
+      setConfigName("rules");
+      return;
+    }
+
+    const pool = configKind === "template" ? templates : items;
+    if (pool.length === 0) return;
+    if (!pool.includes(configName)) {
+      setConfigName(pool[0]);
+    }
+  }, [configKind, configName, items, templates]);
+
+  useEffect(() => {
+    if (templates.length === 0) return;
+    if (!templates.includes(trainingTemplate)) {
+      setTrainingTemplate(templates[0]);
+    }
+  }, [templates, trainingTemplate]);
 
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null;
@@ -128,11 +205,14 @@ export default function Home() {
     setLoading(true);
     try {
       const base64 = await fileToBase64(file);
-      const body = await fetchJson<AnalyzeResponse>("/api/document-engine/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ item, documents: [base64] }),
-      });
+      const body = await fetchJson<AnalyzeResponse>(
+        "/api/document-engine/analyze",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ item, documents: [base64] }),
+        },
+      );
       setResult(body);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
@@ -147,7 +227,9 @@ export default function Home() {
     try {
       let body: { config: unknown };
       if (configKind === "global") {
-        body = await fetchJson<{ config: unknown }>("/api/document-engine/config/global-rules");
+        body = await fetchJson<{ config: unknown }>(
+          "/api/document-engine/config/global-rules",
+        );
       } else if (configKind === "template") {
         body = await fetchJson<{ config: unknown }>(
           `/api/document-engine/config/templates/${configName}`,
@@ -199,6 +281,52 @@ export default function Home() {
     }
   };
 
+  const loadGuidedItem = async (targetItem: string = guidedItemName) => {
+    setGuidedBusy(true);
+    setGuidedMessage(null);
+    try {
+      const body = await fetchJson<{ config: ItemConfig }>(
+        `/api/document-engine/config/items/${targetItem}`,
+      );
+      const cfg = body.config;
+      cfg.required_elements = cfg.required_elements || [];
+      cfg.variant_signatures = cfg.variant_signatures || [];
+      cfg.variants = cfg.variants || [];
+      setGuidedItemConfig(cfg);
+      setGuidedMessage("Item chargé.");
+    } catch {
+      const fresh = emptyItemConfig(targetItem);
+      setGuidedItemConfig(fresh);
+      setGuidedMessage("Item inexistant: nouveau brouillon initialisé.");
+    } finally {
+      setGuidedBusy(false);
+    }
+  };
+
+  const saveGuidedItem = async () => {
+    if (!guidedItemConfig) return;
+    setGuidedBusy(true);
+    setGuidedMessage(null);
+    try {
+      const payload: ItemConfig = {
+        ...guidedItemConfig,
+        item: guidedItemName,
+        variants: guidedItemConfig.variant_signatures.map((v) => v.name),
+      };
+      await fetchJson(`/api/document-engine/config/items/${guidedItemName}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload }),
+      });
+      await refreshLists();
+      setGuidedMessage("Item sauvegardé.");
+    } catch (err) {
+      setGuidedMessage(err instanceof Error ? err.message : "Erreur de sauvegarde");
+    } finally {
+      setGuidedBusy(false);
+    }
+  };
+
   const onTrainingFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []).filter(
       (f) => f.type === "application/pdf",
@@ -206,16 +334,40 @@ export default function Home() {
     setTrainingFiles(files);
   };
 
+  const clearTrainingFiles = () => {
+    setTrainingFiles([]);
+    if (trainingInputRef.current) {
+      trainingInputRef.current.value = "";
+    }
+  };
+
+  const pushTrainingTrace = (message: string) => {
+    const stamp = new Date().toISOString().slice(11, 19);
+    setTrainingTrace((prev) => [...prev, `[${stamp}] ${message}`]);
+  };
+
   const runTraining = async () => {
     setTrainingBusy(true);
     setTrainingMessage(null);
+    setTrainingTrace([]);
+    setTrainingResult(null);
     try {
+      pushTrainingTrace("Début du training");
       if (trainingFiles.length < 3) {
-        throw new Error("Ajoute au moins 3 PDF (idéalement 5 à 10)."
-        );
+        pushTrainingTrace(`Validation échouée: ${trainingFiles.length} PDF fourni(s)`);
+        throw new Error("Ajoute au moins 3 PDF (idéalement 5 à 10).");
       }
-      const docs = await Promise.all(trainingFiles.map((f) => fileToBase64(f)));
-      await fetchJson("/api/document-engine/training/build-item", {
+      pushTrainingTrace(`Validation OK: ${trainingFiles.length} PDF`);
+
+      const docs: string[] = [];
+      for (let i = 0; i < trainingFiles.length; i += 1) {
+        const file = trainingFiles[i];
+        pushTrainingTrace(`Encodage PDF ${i + 1}/${trainingFiles.length}: ${file.name}`);
+        docs.push(await fileToBase64(file));
+      }
+      pushTrainingTrace("Encodage terminé, envoi au backend");
+
+      const response = await fetch("/api/document-engine/training/build-item", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -226,9 +378,40 @@ export default function Home() {
           documents: docs,
         }),
       });
+      pushTrainingTrace(`Réponse HTTP reçue: ${response.status}`);
+
+      const rawBody = await response.text();
+      let parsedBody: unknown = null;
+      try {
+        parsedBody = rawBody ? JSON.parse(rawBody) : null;
+      } catch {
+        parsedBody = rawBody;
+      }
+
+      if (!response.ok) {
+        const detail =
+          typeof parsedBody === "object" && parsedBody && "detail" in parsedBody
+            ? String((parsedBody as { detail: unknown }).detail)
+            : rawBody || `HTTP ${response.status}`;
+        pushTrainingTrace(`Erreur backend: ${detail}`);
+        throw new Error(detail);
+      }
+
+      pushTrainingTrace("Backend OK, rafraîchissement des listes");
+      const result = parsedBody as TrainingBuildResponse;
+      setTrainingResult(result);
+      setGuidedItemConfig(result.config);
       await refreshLists();
-      setTrainingMessage(`Item '${trainingItem}' généré et sauvegardé.`);
+      clearTrainingFiles();
+      setGuidedItemName(result.item);
+      setTab("config");
+      pushTrainingTrace("Training terminé avec succès");
+      setTrainingMessage(
+        `Item '${result.item}' généré et sauvegardé (${result.saved_to}).`,
+      );
     } catch (err) {
+      const detail = err instanceof Error ? err.message : "Erreur training";
+      pushTrainingTrace(`Erreur attrapée: ${detail}`);
       setTrainingMessage(err instanceof Error ? err.message : "Erreur training");
     } finally {
       setTrainingBusy(false);
@@ -275,7 +458,9 @@ export default function Home() {
               className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/70 p-5"
             >
               <div>
-                <label className="mb-2 block text-sm font-medium text-slate-200">Item</label>
+                <label className="mb-2 block text-sm font-medium text-slate-200">
+                  Item
+                </label>
                 <select
                   value={item}
                   onChange={(e) => setItem(e.target.value)}
@@ -290,7 +475,9 @@ export default function Home() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium text-slate-200">PDF</label>
+                <label className="mb-2 block text-sm font-medium text-slate-200">
+                  PDF
+                </label>
                 <input
                   type="file"
                   accept="application/pdf"
@@ -313,18 +500,24 @@ export default function Home() {
             {result ? (
               <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
                 <p className="text-sm text-slate-300">
-                  Score: <b>{scorePercent}%</b> | Validité: <b>{result.valid ? "valide" : "invalide"}</b>
+                  Score: <b>{scorePercent}%</b> | Validité:{" "}
+                  <b>{result.valid ? "valide" : "invalide"}</b>
                 </p>
                 <p className="mt-1 text-sm text-slate-300">
-                  Variant: <b>{result.variant_detected || "non détectée"}</b> (score {result.variant_score.toFixed(2)})
+                  Variant: <b>{result.variant_detected || "non détectée"}</b>
+                  {" "}(score {result.variant_score.toFixed(2)})
                 </p>
                 <p className="mt-1 text-sm text-slate-300">
-                  Poids détecté: <b>{result.matched_weight_sum}</b> / {result.total_weight_sum} | Seuil: {result.threshold}
+                  Poids détecté: <b>{result.matched_weight_sum}</b> / {result.total_weight_sum}
+                  {" "}| Seuil: {result.threshold}
                 </p>
                 <p className="mt-1 text-sm text-slate-300">
-                  OCR: {result.ocr_used ? "oui" : "non"} | Temps: {result.processing_time_ms} ms
+                  OCR: {result.ocr_used ? "oui" : "non"} | Temps:{" "}
+                  {result.processing_time_ms} ms
                 </p>
-                <p className="mt-2 text-sm text-slate-300">Éléments manquants: {result.missing_elements.join(", ") || "aucun"}</p>
+                <p className="mt-2 text-sm text-slate-300">
+                  Éléments manquants: {result.missing_elements.join(", ") || "aucun"}
+                </p>
               </div>
             ) : null}
           </section>
@@ -332,57 +525,331 @@ export default function Home() {
 
         {tab === "config" ? (
           <section className="mt-6 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
-            <div className="grid gap-3 sm:grid-cols-3">
+            <h2 className="text-lg font-semibold">Éditeur guidé d&apos;item</h2>
+
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
               <select
-                value={configKind}
-                onChange={(e) => setConfigKind(e.target.value as ConfigKind)}
+                value={guidedItemName}
+                onChange={(e) => {
+                  const nextItem = e.target.value;
+                  setGuidedItemName(nextItem);
+                  loadGuidedItem(nextItem).catch(() => undefined);
+                }}
                 className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
               >
-                <option value="item">item</option>
-                <option value="template">template</option>
-                <option value="global">global rules</option>
-              </select>
-
-              <input
-                value={configName}
-                onChange={(e) => setConfigName(e.target.value)}
-                list="config-names"
-                disabled={configKind === "global"}
-                placeholder={configKind === "global" ? "rules" : "name"}
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm disabled:opacity-40"
-              />
-              <datalist id="config-names">
-                {optionList.map((name) => (
-                  <option key={name} value={name} />
+                {items.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
                 ))}
-              </datalist>
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={loadConfig}
-                  disabled={configBusy}
-                  className="rounded-lg bg-slate-700 px-3 py-2 text-sm"
-                >
-                  Charger
-                </button>
-                <button
-                  type="button"
-                  onClick={saveConfig}
-                  disabled={configBusy}
-                  className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
-                >
-                  Sauvegarder
-                </button>
-              </div>
+              </select>
+              <button
+                type="button"
+                onClick={() => {
+                  loadGuidedItem().catch(() => undefined);
+                }}
+                disabled={guidedBusy}
+                className="rounded-lg bg-slate-700 px-3 py-2 text-sm"
+              >
+                Charger item
+              </button>
+              <button
+                type="button"
+                onClick={saveGuidedItem}
+                disabled={guidedBusy || !guidedItemConfig}
+                className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
+              >
+                Sauvegarder item
+              </button>
             </div>
 
-            <textarea
-              value={configText}
-              onChange={(e) => setConfigText(e.target.value)}
-              className="mt-4 min-h-[420px] w-full rounded-lg border border-slate-700 bg-slate-950 p-3 font-mono text-xs"
-            />
-            {configMessage ? <p className="mt-2 text-sm text-slate-300">{configMessage}</p> : null}
+            {guidedItemConfig ? (
+              <div className="mt-4 space-y-4 rounded-lg border border-slate-800 bg-slate-950 p-4">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <input
+                    value={guidedItemConfig.language || "fr"}
+                    onChange={(e) =>
+                      setGuidedItemConfig({ ...guidedItemConfig, language: e.target.value })
+                    }
+                    placeholder="language"
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                  />
+                  <input
+                    value={guidedItemConfig.template || "contract"}
+                    onChange={(e) =>
+                      setGuidedItemConfig({ ...guidedItemConfig, template: e.target.value })
+                    }
+                    placeholder="template"
+                    list="template-names"
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                  />
+                  <datalist id="template-names">
+                    {templates.map((name) => (
+                      <option key={name} value={name} />
+                    ))}
+                  </datalist>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    value={guidedItemConfig.threshold ?? 0.7}
+                    onChange={(e) =>
+                      setGuidedItemConfig({
+                        ...guidedItemConfig,
+                        threshold: Number(e.target.value),
+                      })
+                    }
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm font-medium text-slate-200">Required elements</p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setGuidedItemConfig({
+                          ...guidedItemConfig,
+                          required_elements: [
+                            ...guidedItemConfig.required_elements,
+                            { name: "nouvel_element", weight: 1 },
+                          ],
+                        })
+                      }
+                      className="rounded bg-slate-700 px-2 py-1 text-xs"
+                    >
+                      + élément
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {guidedItemConfig.required_elements.map((element, idx) => (
+                      <div key={`${element.name}-${idx}`} className="grid gap-2 sm:grid-cols-6">
+                        <input
+                          value={element.name}
+                          onChange={(e) => {
+                            const next = [...guidedItemConfig.required_elements];
+                            next[idx] = { ...next[idx], name: e.target.value };
+                            setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                          }}
+                          className="sm:col-span-4 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={element.weight}
+                          onChange={(e) => {
+                            const next = [...guidedItemConfig.required_elements];
+                            next[idx] = { ...next[idx], weight: Number(e.target.value) };
+                            setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                          }}
+                          className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = guidedItemConfig.required_elements.filter((_, i) => i !== idx);
+                            setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                          }}
+                          className="rounded bg-rose-800 px-2 py-1 text-xs"
+                        >
+                          Suppr
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm font-medium text-slate-200">Variant signatures</p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setGuidedItemConfig({
+                          ...guidedItemConfig,
+                          variant_signatures: [
+                            ...guidedItemConfig.variant_signatures,
+                            {
+                              name: "new_variant",
+                              page_count: 1,
+                              dominant_keywords: [],
+                              table_presence: false,
+                              title_patterns: [],
+                            },
+                          ],
+                        })
+                      }
+                      className="rounded bg-slate-700 px-2 py-1 text-xs"
+                    >
+                      + variant
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {guidedItemConfig.variant_signatures.map((variant, idx) => (
+                      <div key={`${variant.name}-${idx}`} className="rounded border border-slate-800 p-3">
+                        <div className="grid gap-2 sm:grid-cols-4">
+                          <input
+                            value={variant.name}
+                            onChange={(e) => {
+                              const next = [...guidedItemConfig.variant_signatures];
+                              next[idx] = { ...next[idx], name: e.target.value };
+                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                            }}
+                            className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            placeholder="name"
+                          />
+                          <input
+                            type="number"
+                            min="1"
+                            value={variant.page_count}
+                            onChange={(e) => {
+                              const next = [...guidedItemConfig.variant_signatures];
+                              next[idx] = { ...next[idx], page_count: Number(e.target.value) };
+                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                            }}
+                            className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            placeholder="page_count"
+                          />
+                          <label className="inline-flex items-center gap-2 text-xs text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={variant.table_presence}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.variant_signatures];
+                                next[idx] = { ...next[idx], table_presence: e.target.checked };
+                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                              }}
+                            />
+                            table_presence
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = guidedItemConfig.variant_signatures.filter((_, i) => i !== idx);
+                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                            }}
+                            className="rounded bg-rose-800 px-2 py-1 text-xs"
+                          >
+                            Suppr
+                          </button>
+                        </div>
+                        <input
+                          value={variant.dominant_keywords.join(", ")}
+                          onChange={(e) => {
+                            const next = [...guidedItemConfig.variant_signatures];
+                            next[idx] = {
+                              ...next[idx],
+                              dominant_keywords: e.target.value
+                                .split(",")
+                                .map((v) => v.trim())
+                                .filter(Boolean),
+                            };
+                            setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                          }}
+                          className="mt-2 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                          placeholder="dominant_keywords (comma-separated)"
+                        />
+                        <input
+                          value={variant.title_patterns.join(", ")}
+                          onChange={(e) => {
+                            const next = [...guidedItemConfig.variant_signatures];
+                            next[idx] = {
+                              ...next[idx],
+                              title_patterns: e.target.value
+                                .split(",")
+                                .map((v) => v.trim())
+                                .filter(Boolean),
+                            };
+                            setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                          }}
+                          className="mt-2 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                          placeholder="title_patterns (comma-separated)"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {guidedMessage ? (
+              <p className="mt-3 text-sm text-slate-300">{guidedMessage}</p>
+            ) : null}
+
+            <div className="mt-6 border-t border-slate-800 pt-4">
+              <button
+                type="button"
+                onClick={() => setShowAdvancedConfig((v) => !v)}
+                className="rounded-lg bg-slate-800 px-3 py-2 text-sm"
+              >
+                {showAdvancedConfig ? "Masquer JSON avancé" : "Afficher JSON avancé"}
+              </button>
+            </div>
+
+            {showAdvancedConfig ? (
+              <div className="mt-4">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <select
+                    value={configKind}
+                    onChange={(e) => setConfigKind(e.target.value as ConfigKind)}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                  >
+                    <option value="item">item</option>
+                    <option value="template">template</option>
+                    <option value="global">global rules</option>
+                  </select>
+
+                  <select
+                    value={configKind === "global" ? "rules" : configName}
+                    onChange={(e) => setConfigName(e.target.value)}
+                    disabled={configKind === "global"}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm disabled:opacity-40"
+                  >
+                    {configKind === "global" ? (
+                      <option value="rules">rules</option>
+                    ) : (
+                      optionList.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))
+                    )}
+                  </select>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={loadConfig}
+                      disabled={configBusy}
+                      className="rounded-lg bg-slate-700 px-3 py-2 text-sm"
+                    >
+                      Charger
+                    </button>
+                    <button
+                      type="button"
+                      onClick={saveConfig}
+                      disabled={configBusy}
+                      className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
+                    >
+                      Sauvegarder
+                    </button>
+                  </div>
+                </div>
+
+                <textarea
+                  value={configText}
+                  onChange={(e) => setConfigText(e.target.value)}
+                  className="mt-4 min-h-[320px] w-full rounded-lg border border-slate-700 bg-slate-950 p-3 font-mono text-xs"
+                />
+                {configMessage ? (
+                  <p className="mt-2 text-sm text-slate-300">{configMessage}</p>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -395,33 +862,78 @@ export default function Home() {
                 placeholder="nouvel_item"
                 className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
               />
-              <input
+              <select
                 value={trainingTemplate}
                 onChange={(e) => setTrainingTemplate(e.target.value)}
-                placeholder="contract"
                 className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-              />
+              >
+                {templates.length === 0 ? (
+                  <option value="contract">contract</option>
+                ) : (
+                  templates.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))
+                )}
+              </select>
             </div>
 
             <input
+              ref={trainingInputRef}
               type="file"
               accept="application/pdf"
               multiple
               onChange={onTrainingFiles}
               className="mt-4 block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-950"
             />
-            <p className="mt-2 text-xs text-slate-400">{trainingFiles.length} PDF sélectionné(s)</p>
+            <p className="mt-2 text-xs text-slate-400">
+              {trainingFiles.length} PDF sélectionné(s)
+            </p>
 
-            <button
-              type="button"
-              onClick={runTraining}
-              disabled={trainingBusy}
-              className="mt-4 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-50"
-            >
-              {trainingBusy ? "Training en cours..." : "Générer un item"}
-            </button>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={runTraining}
+                disabled={trainingBusy}
+                className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-50"
+              >
+                {trainingBusy ? "Training en cours..." : "Générer un item"}
+              </button>
+              <button
+                type="button"
+                onClick={clearTrainingFiles}
+                disabled={trainingBusy || trainingFiles.length === 0}
+                className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-slate-100 disabled:opacity-50"
+              >
+                Supprimer les PDF chargés
+              </button>
+            </div>
 
-            {trainingMessage ? <p className="mt-2 text-sm text-slate-300">{trainingMessage}</p> : null}
+            {trainingMessage ? (
+              <p className="mt-2 text-sm text-slate-300">{trainingMessage}</p>
+            ) : null}
+
+            {trainingTrace.length > 0 ? (
+              <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                <p className="mb-2 text-xs font-semibold text-slate-300">Trace training</p>
+                <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
+                  {trainingTrace.join("\n")}
+                </pre>
+              </div>
+            ) : null}
+
+            {trainingResult ? (
+              <div className="mt-3 rounded-lg border border-emerald-700/50 bg-emerald-950/20 p-3">
+                <p className="text-xs text-emerald-200">
+                  Résultat: item <b>{trainingResult.item}</b> sauvegardé dans{" "}
+                  <code>{trainingResult.saved_to}</code>
+                </p>
+                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-emerald-100">
+                  {JSON.stringify(trainingResult.config, null, 2)}
+                </pre>
+              </div>
+            ) : null}
           </section>
         ) : null}
       </section>

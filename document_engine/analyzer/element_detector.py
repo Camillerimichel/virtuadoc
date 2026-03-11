@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from rapidfuzz import fuzz
 
-from document_engine.types import DetectionResult, LayoutZone
+from document_engine.model_types import DetectionResult, LayoutZone
 
 
 class ElementDetector:

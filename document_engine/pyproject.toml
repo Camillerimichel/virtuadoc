@@ -27,6 +27,26 @@ dev = [
   "httpx>=0.27.0"
 ]
 
+[tool.setuptools]
+packages = [
+  "document_engine",
+  "document_engine.analyzer",
+  "document_engine.api",
+  "document_engine.config",
+  "document_engine.config.global",
+  "document_engine.config.items",
+  "document_engine.config.templates",
+  "document_engine.core",
+  "document_engine.training",
+  "document_engine.workers"
+]
+
+[tool.setuptools.package-dir]
+document_engine = "."
+
+[tool.setuptools.package-data]
+document_engine = ["config/**/*.yml"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

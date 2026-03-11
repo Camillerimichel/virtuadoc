@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rapidfuzz import fuzz
 
-from document_engine.types import DocumentSignature
+from document_engine.model_types import DocumentSignature
 
 
 class VariantMatcher:

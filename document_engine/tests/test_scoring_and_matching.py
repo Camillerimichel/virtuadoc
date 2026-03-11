@@ -1,6 +1,6 @@
 from document_engine.analyzer.scoring_engine import ScoringEngine
 from document_engine.analyzer.variant_matcher import VariantMatcher
-from document_engine.types import DetectionResult, DocumentSignature
+from document_engine.model_types import DetectionResult, DocumentSignature
 
 
 def test_scoring_engine_weighted_ratio() -> None:

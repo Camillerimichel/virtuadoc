@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from document_engine.types import OcrBlock
+from document_engine.model_types import OcrBlock
 
 
 class OcrEngine:

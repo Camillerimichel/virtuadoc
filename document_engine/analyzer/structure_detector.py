@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from document_engine.types import DocumentSignature, LayoutZone
+from document_engine.model_types import DocumentSignature, LayoutZone
 
 _STOP_WORDS = {
     "de",

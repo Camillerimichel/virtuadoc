@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from document_engine.types import DetectionResult
+from document_engine.model_types import DetectionResult
 
 
 class ScoringEngine:

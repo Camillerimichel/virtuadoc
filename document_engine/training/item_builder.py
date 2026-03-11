@@ -2,11 +2,24 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+import re
 
 from document_engine.analyzer.structure_detector import StructureDetector
 from document_engine.core.layout_parser import LayoutParser
 from document_engine.core.pdf_loader import PdfLoader
 from document_engine.core.text_extractor import TextExtractor
+
+_REQUIRED_STOP_WORDS = {
+    "date",
+    "social",
+    "code",
+    "rue",
+    "extrait",
+    "gestion",
+    "controle",
+    "activites",
+    "activite",
+}
 
 
 class ItemBuilder:
@@ -39,18 +52,14 @@ class ItemBuilder:
 
         dominant_keywords = [k for k, _ in keyword_counter.most_common(12)]
         page_mode = page_counter.most_common(1)[0][0]
+        required_elements = self._build_required_elements(dominant_keywords, signatures)
 
         return {
             "item": item,
             "language": language,
             "template": template,
             "threshold": threshold,
-            "required_elements": [
-                {"name": "souscripteur", "weight": 2},
-                {"name": "beneficiaire", "weight": 2},
-                {"name": "date", "weight": 1},
-                {"name": "signature", "weight": 3},
-            ],
+            "required_elements": required_elements,
             "variants": [f"{item}_v1"],
             "variant_signatures": [
                 {
@@ -66,6 +75,28 @@ class ItemBuilder:
                 "page_distribution": dict(page_counter),
             },
         }
+
+    def _build_required_elements(self, dominant_keywords: list[str], signatures: list[dict]) -> list[dict]:
+        candidates: list[str] = []
+        candidates.extend(dominant_keywords)
+        if signatures:
+            for title in signatures[0].get("title_patterns", [])[:6]:
+                candidates.extend(re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\\-]{3,}", title.lower()))
+
+        deduped: list[str] = []
+        for token in candidates:
+            cleaned = token.strip().lower()
+            if len(cleaned) < 4:
+                continue
+            if cleaned in _REQUIRED_STOP_WORDS:
+                continue
+            if cleaned not in deduped:
+                deduped.append(cleaned)
+
+        top = deduped[:6]
+        if not top:
+            top = ["document"]
+        return [{"name": name, "weight": 1} for name in top]
 
     def save(self, config: dict, config_dir: Path) -> Path:
         import yaml
