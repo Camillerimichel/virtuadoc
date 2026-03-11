@@ -60,6 +60,18 @@ class AnalyzePipeline:
         completeness_score = self.scoring_engine.compute(required_elements, detections)
         threshold = float(item_config.get("threshold", 0.7))
         valid = variant_match and completeness_score >= threshold
+        detected_names = {d.name for d in detections}
+        total_weight = sum(float(e.get("weight", 1)) for e in required_elements) or 1.0
+        detected_weight = sum(
+            float(e.get("weight", 1))
+            for e in required_elements
+            if e.get("name") in detected_names
+        )
+        missing_elements = [
+            e.get("name")
+            for e in required_elements
+            if e.get("name") not in detected_names
+        ]
 
         return {
             "document_id": document_id,
@@ -68,6 +80,10 @@ class AnalyzePipeline:
             "valid": valid,
             "variant_detected": variant_name,
             "variant_score": variant_score,
+            "threshold": threshold,
+            "matched_weight_sum": round(detected_weight, 4),
+            "total_weight_sum": round(total_weight, 4),
+            "missing_elements": missing_elements,
             "elements_found": [{"name": d.name, "page": d.page} for d in detections],
             "ocr_used": ocr_used,
             "processing_time_ms": int((time.perf_counter() - t0) * 1000),
