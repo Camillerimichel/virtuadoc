@@ -1,0 +1,11 @@
+template: contract
+typical_layout_zones:
+  - title
+  - paragraph
+  - form_zone
+  - table
+signature_pages:
+  - last
+common_block_positions:
+  parties: top
+  signature: bottom

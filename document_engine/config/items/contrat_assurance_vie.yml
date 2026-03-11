@@ -1,0 +1,33 @@
+item: contrat_assurance_vie
+language: fr
+template: contract
+threshold: 0.7
+required_elements:
+  - name: souscripteur
+    weight: 2
+  - name: beneficiaire
+    weight: 2
+  - name: date
+    weight: 1
+  - name: signature
+    weight: 3
+variants:
+  - axa_v1
+  - generali_v1
+  - cardif_v1
+variant_signatures:
+  - name: axa_v1
+    page_count: 6
+    dominant_keywords: ["axa", "assurance", "vie", "souscripteur", "bénéficiaire"]
+    table_presence: true
+    title_patterns: ["Contrat d'assurance vie", "Conditions particulières"]
+  - name: generali_v1
+    page_count: 8
+    dominant_keywords: ["generali", "contrat", "épargne", "souscripteur"]
+    table_presence: true
+    title_patterns: ["Bulletin de souscription", "Clause bénéficiaire"]
+  - name: cardif_v1
+    page_count: 7
+    dominant_keywords: ["cardif", "adhésion", "assurance", "vie"]
+    table_presence: false
+    title_patterns: ["Demande d'adhésion", "Signature"]
