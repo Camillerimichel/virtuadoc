@@ -1,0 +1,6 @@
+fastapi>=0.115.0
+pdfminer.six>=20231228
+rapidfuzz>=3.9.0
+pydantic>=2.7.0
+PyYAML>=6.0.1
+pytest>=8.2.0
