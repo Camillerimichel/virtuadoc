@@ -53,3 +53,34 @@ Endpoints:
 
 - `POST /analyze`
 - `POST /training/build-item`
+
+## Production Delivery
+
+Production scripts are in `scripts/prod`.
+
+### One-shot release (compile + deploy)
+
+```bash
+cd /var/www/VirtuaDoc
+./scripts/prod/release.sh
+```
+
+### Compile only
+
+```bash
+cd /var/www/VirtuaDoc
+./scripts/prod/compile.sh
+```
+
+### Deploy only
+
+```bash
+cd /var/www/VirtuaDoc
+./scripts/prod/deploy.sh
+```
+
+Options:
+
+- `./scripts/prod/deploy.sh --ref main`
+- `./scripts/prod/deploy.sh --skip-pull`
+- `./scripts/prod/deploy.sh --allow-dirty`
