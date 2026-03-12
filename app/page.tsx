@@ -45,7 +45,11 @@ type AnalyzeResponse = {
   native_text_length: number;
   ocr_error?: string | null;
   processing_time_ms: number;
+  document_type: "pdf" | "excel";
+  excel_pairs_preview: string[];
 };
+
+type DocumentType = "pdf" | "excel";
 
 type Tab = "analyze" | "config" | "training";
 type ConfigKind = "item" | "template" | "global";
@@ -84,6 +88,13 @@ type ItemConfig = {
   required_elements: RequiredElement[];
   variants: string[];
   variant_signatures: VariantSignature[];
+  audit?: {
+    sample_count?: number;
+    page_distribution?: Record<string, number>;
+    document_type?: "pdf" | "excel";
+    excel_header_axis?: "first_row" | "first_column" | null;
+    excel_pairs_preview?: string[];
+  };
 };
 
 type TrainingBuildResponse = {
@@ -104,6 +115,22 @@ function fileToBase64(file: File): Promise<string> {
     reader.onerror = () => reject(new Error("Impossible de lire le fichier"));
     reader.readAsDataURL(file);
   });
+}
+
+function detectDocumentType(file: File): DocumentType | null {
+  const fileName = (file.name || "").toLowerCase();
+  if (fileName.endsWith(".pdf")) return "pdf";
+  if (fileName.endsWith(".xlsx") || fileName.endsWith(".xlsm")) return "excel";
+
+  const mime = (file.type || "").toLowerCase();
+  if (mime === "application/pdf") return "pdf";
+  if (
+    mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    mime === "application/vnd.ms-excel.sheet.macroenabled.12"
+  ) {
+    return "excel";
+  }
+  return null;
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -135,6 +162,8 @@ export default function Home() {
 
   const [item, setItem] = useState("contrat_assurance_vie");
   const [analyzeOcrMode, setAnalyzeOcrMode] = useState<"native" | "ocr">("native");
+  const [analyzeExcelHeaderAxis, setAnalyzeExcelHeaderAxis] =
+    useState<"first_row" | "first_column">("first_row");
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -156,6 +185,8 @@ export default function Home() {
 
   const [trainingItem, setTrainingItem] = useState("nouvel_item");
   const [trainingTemplate, setTrainingTemplate] = useState("contract");
+  const [trainingExcelHeaderAxis, setTrainingExcelHeaderAxis] =
+    useState<"first_row" | "first_column">("first_row");
   const [trainingFiles, setTrainingFiles] = useState<File[]>([]);
   const [trainingBusy, setTrainingBusy] = useState(false);
   const [trainingMessage, setTrainingMessage] = useState<string | null>(null);
@@ -214,7 +245,18 @@ export default function Home() {
 
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null;
+    const nextType = nextFile ? detectDocumentType(nextFile) : null;
+    if (nextFile && !nextType) {
+      setFile(null);
+      setError("Formats supportés: PDF, XLSX, XLSM.");
+      setResult(null);
+      setAnalyzeTrace([]);
+      return;
+    }
     setFile(nextFile);
+    if (nextType === "excel") {
+      setAnalyzeOcrMode("native");
+    }
     setResult(null);
     setError(null);
     setAnalyzeTrace([]);
@@ -233,30 +275,44 @@ export default function Home() {
     pushAnalyzeTrace("Début de l'analyse");
 
     if (!file) {
-      pushAnalyzeTrace("Validation échouée: aucun PDF sélectionné");
-      setError("Sélectionne un PDF avant de lancer l'analyse.");
+      pushAnalyzeTrace("Validation échouée: aucun fichier sélectionné");
+      setError("Sélectionne un fichier (PDF ou Excel) avant de lancer l'analyse.");
       return;
     }
 
-    if (file.type !== "application/pdf") {
+    const documentType = detectDocumentType(file);
+    if (!documentType) {
       pushAnalyzeTrace(`Validation échouée: type invalide (${file.type || "inconnu"})`);
-      setError("Le fichier doit être un PDF.");
+      setError("Le fichier doit être un PDF, XLSX ou XLSM.");
       return;
     }
 
-    pushAnalyzeTrace(`Validation OK: ${file.name}`);
+    if (documentType === "excel" && analyzeOcrMode === "ocr") {
+      setAnalyzeOcrMode("native");
+    }
+
+    pushAnalyzeTrace(`Validation OK: ${file.name} (${documentType})`);
     setLoading(true);
     try {
-      pushAnalyzeTrace("Encodage Base64 du PDF");
+      pushAnalyzeTrace("Encodage Base64 du fichier");
       const base64 = await fileToBase64(file);
       pushAnalyzeTrace(`Encodage terminé (${Math.round(base64.length / 1024)} KB Base64)`);
-      pushAnalyzeTrace(`Envoi au backend (item: ${item}, mode: ${analyzeOcrMode})`);
+      const modeToSend = documentType === "excel" ? "native" : analyzeOcrMode;
+      pushAnalyzeTrace(
+        `Envoi au backend (item: ${item}, type: ${documentType}, mode: ${modeToSend}${documentType === "excel" ? `, intitulés=${analyzeExcelHeaderAxis}` : ""})`,
+      );
       const body = await fetchJson<AnalyzeResponse>(
         "/api/document-engine/analyze",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ item, documents: [base64], ocr_mode: analyzeOcrMode }),
+          body: JSON.stringify({
+            item,
+            documents: [base64],
+            ocr_mode: modeToSend,
+            document_type: documentType,
+            excel_header_axis: analyzeExcelHeaderAxis,
+          }),
         },
       );
       pushAnalyzeTrace("Réponse backend reçue");
@@ -391,9 +447,7 @@ export default function Home() {
   };
 
   const onTrainingFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []).filter(
-      (f) => f.type === "application/pdf",
-    );
+    const files = Array.from(event.target.files || []).filter((f) => detectDocumentType(f) !== null);
     setTrainingFiles(files);
   };
 
@@ -417,15 +471,28 @@ export default function Home() {
     try {
       pushTrainingTrace("Début du training");
       if (trainingFiles.length < 3) {
-        pushTrainingTrace(`Validation échouée: ${trainingFiles.length} PDF fourni(s)`);
-        throw new Error("Ajoute au moins 3 PDF (idéalement 5 à 10).");
+        pushTrainingTrace(`Validation échouée: ${trainingFiles.length} document(s) fourni(s)`);
+        throw new Error("Ajoute au moins 3 documents (idéalement 5 à 10).");
       }
-      pushTrainingTrace(`Validation OK: ${trainingFiles.length} PDF`);
+      const types = new Set(trainingFiles.map((f) => detectDocumentType(f)));
+      if (types.has(null)) {
+        throw new Error("Un ou plusieurs fichiers sont dans un format non supporté.");
+      }
+      if (types.size > 1) {
+        throw new Error("Mélange interdit: en training, utilise uniquement PDF ou uniquement Excel.");
+      }
+      const documentType = Array.from(types)[0] as DocumentType;
+      pushTrainingTrace(`Validation OK: ${trainingFiles.length} document(s) (${documentType})`);
+      if (documentType === "excel") {
+        pushTrainingTrace(
+          `Paramètre Excel: intitulés en ${trainingExcelHeaderAxis === "first_row" ? "première ligne" : "première colonne"}`,
+        );
+      }
 
       const docs: string[] = [];
       for (let i = 0; i < trainingFiles.length; i += 1) {
         const file = trainingFiles[i];
-        pushTrainingTrace(`Encodage PDF ${i + 1}/${trainingFiles.length}: ${file.name}`);
+        pushTrainingTrace(`Encodage fichier ${i + 1}/${trainingFiles.length}: ${file.name}`);
         docs.push(await fileToBase64(file));
       }
       pushTrainingTrace("Encodage terminé, envoi au backend");
@@ -439,6 +506,8 @@ export default function Home() {
           language: "fr",
           threshold: 0.7,
           documents: docs,
+          document_type: documentType,
+          excel_header_axis: trainingExcelHeaderAxis,
         }),
       });
       pushTrainingTrace(`Réponse HTTP reçue: ${response.status}`);
@@ -538,12 +607,12 @@ export default function Home() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium text-slate-200">
-                  PDF
+                  <label className="mb-2 block text-sm font-medium text-slate-200">
+                  Document (PDF ou Excel natif)
                 </label>
                 <input
                   type="file"
-                  accept="application/pdf"
+                  accept=".pdf,.xlsx,.xlsm,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
                   onChange={onFileChange}
                   className="block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-950"
                 />
@@ -568,6 +637,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setAnalyzeOcrMode("ocr")}
+                    disabled={file ? detectDocumentType(file) === "excel" : false}
                     className={`rounded-lg px-3 py-2 text-sm font-semibold ${
                       analyzeOcrMode === "ocr"
                         ? "bg-emerald-400 text-slate-950"
@@ -578,9 +648,29 @@ export default function Home() {
                   </button>
                 </div>
                 <p className="mt-1 text-xs text-slate-400">
-                  Natif = extraction texte PDF. OCR = forcer lecture image/scanner.
+                  Natif = extraction texte PDF/Excel. OCR = forcer lecture image/scanner (PDF uniquement).
                 </p>
               </div>
+
+              {file && detectDocumentType(file) === "excel" ? (
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-200">
+                    Excel: position des intitulés
+                  </label>
+                  <select
+                    value={analyzeExcelHeaderAxis}
+                    onChange={(e) =>
+                      setAnalyzeExcelHeaderAxis(
+                        e.target.value as "first_row" | "first_column",
+                      )
+                    }
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                  >
+                    <option value="first_row">Première ligne</option>
+                    <option value="first_column">Première colonne</option>
+                  </select>
+                </div>
+              ) : null}
 
               <button
                 type="submit"
@@ -617,6 +707,9 @@ export default function Home() {
                 <p className="mt-1 text-sm text-slate-300">
                   Poids détecté: <b>{result.matched_weight_sum}</b> / {result.total_weight_sum}
                   {" "}| Seuil: {result.threshold}
+                </p>
+                <p className="mt-1 text-sm text-slate-300">
+                  Type de document: <b>{result.document_type}</b>
                 </p>
                 <p className="mt-1 text-sm text-slate-300">
                   OCR: {result.ocr_used ? "oui" : "non"} (demandé: {result.ocr_mode_requested},
@@ -669,6 +762,22 @@ export default function Home() {
                         ))}
                       </ul>
                     </div>
+                  </div>
+                ) : null}
+                {result.document_type === "excel" ? (
+                  <div className="mt-3 rounded border border-slate-700/70 bg-slate-950/60 p-3 text-xs text-slate-200">
+                    <p className="font-semibold text-slate-100">
+                      Debug Excel: paires détectées (intitulé: valeur)
+                    </p>
+                    {result.excel_pairs_preview.length > 0 ? (
+                      <ul className="mt-2 space-y-1">
+                        {result.excel_pairs_preview.map((line, idx) => (
+                          <li key={`excel-pair-${idx}`}>{line}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-slate-400">Aucune paire détectée.</p>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -1233,19 +1342,38 @@ export default function Home() {
             </div>
 
             <label className="mt-4 block text-xs text-slate-300">
-              Documents PDF (multi-sélection)
+              Documents (PDF ou Excel natif) (multi-sélection)
               <input
                 ref={trainingInputRef}
                 type="file"
-                accept="application/pdf"
+                accept=".pdf,.xlsx,.xlsm,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
                 multiple
                 onChange={onTrainingFiles}
                 className="mt-1 block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-950"
               />
             </label>
             <p className="mt-2 text-xs text-slate-400">
-              {trainingFiles.length} PDF sélectionné(s)
+              {trainingFiles.length} fichier(s) sélectionné(s)
             </p>
+            {trainingFiles.length > 0 &&
+            new Set(trainingFiles.map((f) => detectDocumentType(f))).size === 1 &&
+            detectDocumentType(trainingFiles[0]) === "excel" ? (
+              <label className="mt-3 block text-xs text-slate-300">
+                Excel: position des intitulés
+                <select
+                  value={trainingExcelHeaderAxis}
+                  onChange={(e) =>
+                    setTrainingExcelHeaderAxis(
+                      e.target.value as "first_row" | "first_column",
+                    )
+                  }
+                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                >
+                  <option value="first_row">Première ligne</option>
+                  <option value="first_column">Première colonne</option>
+                </select>
+              </label>
+            ) : null}
 
             <div className="mt-4 flex flex-wrap gap-2">
               <button
@@ -1262,7 +1390,7 @@ export default function Home() {
                 disabled={trainingBusy || trainingFiles.length === 0}
                 className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-slate-100 disabled:opacity-50"
               >
-                Supprimer les PDF chargés
+                Supprimer les fichiers chargés
               </button>
             </div>
 
@@ -1288,6 +1416,23 @@ export default function Home() {
                 <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-emerald-100">
                   {JSON.stringify(trainingResult.config, null, 2)}
                 </pre>
+                {trainingResult.config.audit?.document_type === "excel" ? (
+                  <div className="mt-3 rounded border border-emerald-700/50 bg-slate-950/60 p-3 text-xs text-emerald-100">
+                    <p className="font-semibold">
+                      Debug Excel (training): paires détectées (intitulé: valeur)
+                    </p>
+                    {trainingResult.config.audit?.excel_pairs_preview &&
+                    trainingResult.config.audit.excel_pairs_preview.length > 0 ? (
+                      <ul className="mt-2 space-y-1">
+                        {trainingResult.config.audit.excel_pairs_preview.map((line, idx) => (
+                          <li key={`training-excel-pair-${idx}`}>{line}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-emerald-200/80">Aucune paire détectée.</p>
+                    )}
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </section>

@@ -11,6 +11,7 @@ from document_engine.analyzer.variant_matcher import VariantMatcher
 from document_engine.config.item_loader import ItemLoader
 from document_engine.core.layout_parser import LayoutParser
 from document_engine.core.ocr_engine import OcrEngine
+from document_engine.core.excel_extractor import ExcelExtractor
 from document_engine.core.pdf_loader import PdfLoader
 from document_engine.core.text_extractor import TextExtractor
 from document_engine.model_types import LayoutZone, OcrBlock
@@ -20,23 +21,39 @@ class AnalyzePipeline:
     def __init__(self, config_dir: Path) -> None:
         self.item_loader = ItemLoader(config_dir)
         self.pdf_loader = PdfLoader()
+        self.excel_extractor = ExcelExtractor()
         self.text_extractor = TextExtractor()
         self.layout_parser = LayoutParser()
         self.structure_detector = StructureDetector()
         self.variant_matcher = VariantMatcher()
         self.scoring_engine = ScoringEngine()
 
-    def run(self, item_name: str, base64_pdf: str, ocr_mode: str = "auto") -> dict:
+    def run(
+        self,
+        item_name: str,
+        base64_document: str,
+        ocr_mode: str = "auto",
+        document_type: str = "pdf",
+        excel_header_axis: str = "first_row",
+    ) -> dict:
         t0 = time.perf_counter()
         item_config = self.item_loader.load_item(item_name)
         global_rules = self.item_loader.load_global_rules()
         detector = ElementDetector(global_rules)
 
         document_id = str(uuid.uuid4())
-        pdf_bytes = self.pdf_loader.decode_base64_pdf(base64_pdf)
-        tmp_path = self.pdf_loader.persist_temp(pdf_bytes, Path("/tmp/document_engine"), f"{document_id}.pdf")
-
-        full_text, text_blocks, page_count = self.text_extractor.extract(pdf_bytes)
+        doc_type = document_type if document_type in {"pdf", "excel"} else "pdf"
+        if doc_type == "excel":
+            excel_bytes = self.excel_extractor.decode_base64_excel(base64_document)
+            full_text, text_blocks, page_count = self.excel_extractor.extract(
+                excel_bytes,
+                header_axis=excel_header_axis,
+            )
+            tmp_path = None
+        else:
+            pdf_bytes = self.pdf_loader.decode_base64_pdf(base64_document)
+            tmp_path = self.pdf_loader.persist_temp(pdf_bytes, Path("/tmp/document_engine"), f"{document_id}.pdf")
+            full_text, text_blocks, page_count = self.text_extractor.extract(pdf_bytes)
         native_text_length = len(full_text)
         ocr_used = False
         ocr_blocks = []
@@ -45,10 +62,20 @@ class AnalyzePipeline:
         ocr_attempted = False
         ocr_error: str | None = None
 
-        should_try_ocr = requested_mode == "ocr" or (requested_mode == "auto" and len(full_text) < 200)
+        if doc_type == "excel":
+            applied_mode = "native"
+            if requested_mode == "ocr":
+                ocr_error = "OCR is not supported for Excel native files"
+
+        should_try_ocr = (
+            doc_type == "pdf"
+            and (requested_mode == "ocr" or (requested_mode == "auto" and len(full_text) < 200))
+        )
         if should_try_ocr:
             ocr_attempted = True
             try:
+                if tmp_path is None:
+                    raise RuntimeError("Missing temporary PDF path for OCR")
                 ocr_engine = OcrEngine(language=item_config.get("language", "fr"))
                 ocr_blocks = ocr_engine.run(tmp_path)
                 full_text = full_text + "\n" + "\n".join(b.text for b in ocr_blocks)
@@ -87,6 +114,7 @@ class AnalyzePipeline:
             for e in required_elements
             if e.get("name") not in detected_names
         ]
+        excel_pairs_preview = self._excel_pairs_preview(zones) if doc_type == "excel" else []
 
         return {
             "document_id": document_id,
@@ -124,6 +152,8 @@ class AnalyzePipeline:
             "native_text_length": native_text_length,
             "ocr_error": ocr_error,
             "processing_time_ms": int((time.perf_counter() - t0) * 1000),
+            "document_type": doc_type,
+            "excel_pairs_preview": excel_pairs_preview,
             "signature": {
                 "page_count": signature.page_count,
                 "dominant_keywords": signature.dominant_keywords,
@@ -152,3 +182,18 @@ class AnalyzePipeline:
                 )
             )
         return zones
+
+    def _excel_pairs_preview(self, zones: list[LayoutZone], limit: int = 40) -> list[str]:
+        pairs: list[str] = []
+        seen: set[str] = set()
+        for zone in zones:
+            text = " ".join(zone.text.split())
+            if ":" not in text:
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            pairs.append(text)
+            if len(pairs) >= limit:
+                break
+        return pairs

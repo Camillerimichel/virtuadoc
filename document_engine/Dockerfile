@@ -1,15 +1,18 @@
+# syntax=docker/dockerfile:1.7
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1
 
 WORKDIR /workspace
 
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc g++ \
         libgl1 \
@@ -20,8 +23,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY document_engine/requirements.txt /tmp/requirements.txt
-RUN pip install --upgrade pip \
-    && pip install -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+    && PIP_NO_CACHE_DIR=0 pip install -r /tmp/requirements.txt
 
 COPY document_engine /workspace/document_engine
 

@@ -8,6 +8,8 @@ source "$SCRIPT_DIR/common.sh"
 REF="main"
 SKIP_PULL="false"
 ALLOW_DIRTY="false"
+PULL_BASE="false"
+NO_CACHE="false"
 
 while (($# > 0)); do
   case "$1" in
@@ -21,6 +23,14 @@ while (($# > 0)); do
       ;;
     --allow-dirty)
       ALLOW_DIRTY="true"
+      shift
+      ;;
+    --pull-base)
+      PULL_BASE="true"
+      shift
+      ;;
+    --no-cache)
+      NO_CACHE="true"
       shift
       ;;
     *)
@@ -47,7 +57,16 @@ if [[ "$ALLOW_DIRTY" != "true" && -n "$(git status --porcelain)" ]]; then
 fi
 
 log "Build images production"
-docker compose "${COMPOSE_FILES[@]}" build --pull virtuadoc document_engine
+BUILD_ARGS=()
+if [[ "$PULL_BASE" == "true" ]]; then
+  BUILD_ARGS+=(--pull)
+fi
+if [[ "$NO_CACHE" == "true" ]]; then
+  BUILD_ARGS+=(--no-cache)
+fi
+
+DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 \
+  docker compose "${COMPOSE_FILES[@]}" build "${BUILD_ARGS[@]}" virtuadoc document_engine
 
 log "Déploiement containers production"
 docker compose "${COMPOSE_FILES[@]}" up -d --remove-orphans virtuadoc document_engine

@@ -9,6 +9,8 @@ class AnalyzeRequest(BaseModel):
     item: str = Field(min_length=1)
     documents: list[str] = Field(min_length=1)
     ocr_mode: Literal["auto", "native", "ocr"] = "auto"
+    document_type: Literal["pdf", "excel"] = "pdf"
+    excel_header_axis: Literal["first_row", "first_column"] = "first_row"
 
 
 class ElementFound(BaseModel):
@@ -46,6 +48,8 @@ class AnalyzeResponse(BaseModel):
     native_text_length: int = 0
     ocr_error: str | None = None
     processing_time_ms: int
+    document_type: Literal["pdf", "excel"] = "pdf"
+    excel_pairs_preview: list[str] = []
 
 
 class BuildItemRequest(BaseModel):
@@ -54,3 +58,5 @@ class BuildItemRequest(BaseModel):
     language: str = "fr"
     threshold: float = 0.7
     documents: list[str] = Field(min_length=3, max_length=10)
+    document_type: Literal["pdf", "excel"] = "pdf"
+    excel_header_axis: Literal["first_row", "first_column"] = "first_row"

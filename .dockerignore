@@ -4,3 +4,14 @@ node_modules
 .gitignore
 npm-debug.log*
 *.log
+.venv
+.venv-*
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.sqlite
+*.sql
+backups/
+tmp/

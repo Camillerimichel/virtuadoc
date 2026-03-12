@@ -27,6 +27,8 @@ def build_item(payload: BuildItemRequest) -> dict:
         language=payload.language,
         threshold=payload.threshold,
         docs=payload.documents,
+        document_type=payload.document_type,
+        excel_header_axis=payload.excel_header_axis,
     )
     path = builder.save(config, Path(__file__).resolve().parents[1] / "config" / "items")
     return {"status": "ok", "item": payload.item, "saved_to": str(path), "config": config}

@@ -17,7 +17,13 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         raise HTTPException(status_code=400, detail="Exactly one document is supported per request")
 
     try:
-        result = pipeline.run(payload.item, payload.documents[0], payload.ocr_mode)
+        result = pipeline.run(
+            payload.item,
+            payload.documents[0],
+            payload.ocr_mode,
+            payload.document_type,
+            payload.excel_header_axis,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -43,4 +49,6 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         native_text_length=result["native_text_length"],
         ocr_error=result["ocr_error"],
         processing_time_ms=result["processing_time_ms"],
+        document_type=result["document_type"],
+        excel_pairs_preview=result.get("excel_pairs_preview", []),
     )
