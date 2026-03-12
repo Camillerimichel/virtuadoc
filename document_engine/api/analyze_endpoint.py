@@ -17,7 +17,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         raise HTTPException(status_code=400, detail="Exactly one document is supported per request")
 
     try:
-        result = pipeline.run(payload.item, payload.documents[0])
+        result = pipeline.run(payload.item, payload.documents[0], payload.ocr_mode)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -36,5 +36,11 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         missing_elements=result["missing_elements"],
         elements_found=result["elements_found"],
         ocr_used=result["ocr_used"],
+        ocr_mode_requested=result["ocr_mode_requested"],
+        ocr_mode_applied=result["ocr_mode_applied"],
+        ocr_attempted=result["ocr_attempted"],
+        ocr_blocks_count=result["ocr_blocks_count"],
+        native_text_length=result["native_text_length"],
+        ocr_error=result["ocr_error"],
         processing_time_ms=result["processing_time_ms"],
     )

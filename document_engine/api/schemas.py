@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
 class AnalyzeRequest(BaseModel):
     item: str = Field(min_length=1)
     documents: list[str] = Field(min_length=1)
+    ocr_mode: Literal["auto", "native", "ocr"] = "auto"
 
 
 class ElementFound(BaseModel):
     name: str
     page: int
+    evidence: str | None = None
+    value: str | None = None
+    value_position: str | None = None
+    right_text: str | None = None
+    below_text: str | None = None
+    anchor_text: str | None = None
+    target_text: str | None = None
+    target_right_text: str | None = None
+    target_below_text: str | None = None
+    lines_below: str | None = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -26,6 +39,12 @@ class AnalyzeResponse(BaseModel):
     missing_elements: list[str]
     elements_found: list[ElementFound]
     ocr_used: bool
+    ocr_mode_requested: Literal["auto", "native", "ocr"] = "auto"
+    ocr_mode_applied: Literal["native", "ocr"] = "native"
+    ocr_attempted: bool = False
+    ocr_blocks_count: int = 0
+    native_text_length: int = 0
+    ocr_error: str | None = None
     processing_time_ms: int
 
 

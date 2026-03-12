@@ -5,6 +5,7 @@ rapidfuzz>=3.9.0
 pydantic>=2.7.0
 PyYAML>=6.0.1
 paddleocr>=2.8.1
+paddlepaddle>=3.0.0
 opencv-python-headless>=4.10.0
 redis>=5.0.0
 rq>=1.16.0

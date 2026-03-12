@@ -13,6 +13,16 @@ import {
 type ElementFound = {
   name: string;
   page: number;
+  evidence?: string | null;
+  value?: string | null;
+  value_position?: string | null;
+  right_text?: string | null;
+  below_text?: string | null;
+  anchor_text?: string | null;
+  target_text?: string | null;
+  target_right_text?: string | null;
+  target_below_text?: string | null;
+  lines_below?: string | null;
 };
 
 type AnalyzeResponse = {
@@ -28,6 +38,12 @@ type AnalyzeResponse = {
   missing_elements: string[];
   elements_found: ElementFound[];
   ocr_used: boolean;
+  ocr_mode_requested: "auto" | "native" | "ocr";
+  ocr_mode_applied: "native" | "ocr";
+  ocr_attempted: boolean;
+  ocr_blocks_count: number;
+  native_text_length: number;
+  ocr_error?: string | null;
   processing_time_ms: number;
 };
 
@@ -37,6 +53,19 @@ type ConfigKind = "item" | "template" | "global";
 type RequiredElement = {
   name: string;
   weight: number;
+  strategy?: "keyword" | "relative_anchor";
+  anchor?: {
+    keyword?: string;
+    occurrence?: number;
+  };
+  move?: {
+    lines_below?: number;
+    tolerance?: number;
+  };
+  target?: {
+    keyword?: string;
+    mode?: "contains" | "exact" | "regex";
+  };
 };
 
 type VariantSignature = {
@@ -105,10 +134,12 @@ export default function Home() {
   const [templates, setTemplates] = useState<string[]>([]);
 
   const [item, setItem] = useState("contrat_assurance_vie");
+  const [analyzeOcrMode, setAnalyzeOcrMode] = useState<"native" | "ocr">("native");
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
+  const [analyzeTrace, setAnalyzeTrace] = useState<string[]>([]);
 
   const [configKind, setConfigKind] = useState<ConfigKind>("item");
   const [configName, setConfigName] = useState("contrat_assurance_vie");
@@ -121,6 +152,7 @@ export default function Home() {
   const [guidedItemConfig, setGuidedItemConfig] = useState<ItemConfig | null>(null);
   const [guidedBusy, setGuidedBusy] = useState(false);
   const [guidedMessage, setGuidedMessage] = useState<string | null>(null);
+  const [showConfigHelp, setShowConfigHelp] = useState(false);
 
   const [trainingItem, setTrainingItem] = useState("nouvel_item");
   const [trainingTemplate, setTrainingTemplate] = useState("contract");
@@ -185,38 +217,66 @@ export default function Home() {
     setFile(nextFile);
     setResult(null);
     setError(null);
+    setAnalyzeTrace([]);
+  };
+
+  const pushAnalyzeTrace = (message: string) => {
+    const stamp = new Date().toISOString().slice(11, 19);
+    setAnalyzeTrace((prev) => [...prev, `[${stamp}] ${message}`]);
   };
 
   const onAnalyzeSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
     setResult(null);
+    setAnalyzeTrace([]);
+    pushAnalyzeTrace("Début de l'analyse");
 
     if (!file) {
+      pushAnalyzeTrace("Validation échouée: aucun PDF sélectionné");
       setError("Sélectionne un PDF avant de lancer l'analyse.");
       return;
     }
 
     if (file.type !== "application/pdf") {
+      pushAnalyzeTrace(`Validation échouée: type invalide (${file.type || "inconnu"})`);
       setError("Le fichier doit être un PDF.");
       return;
     }
 
+    pushAnalyzeTrace(`Validation OK: ${file.name}`);
     setLoading(true);
     try {
+      pushAnalyzeTrace("Encodage Base64 du PDF");
       const base64 = await fileToBase64(file);
+      pushAnalyzeTrace(`Encodage terminé (${Math.round(base64.length / 1024)} KB Base64)`);
+      pushAnalyzeTrace(`Envoi au backend (item: ${item}, mode: ${analyzeOcrMode})`);
       const body = await fetchJson<AnalyzeResponse>(
         "/api/document-engine/analyze",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ item, documents: [base64] }),
+          body: JSON.stringify({ item, documents: [base64], ocr_mode: analyzeOcrMode }),
         },
+      );
+      pushAnalyzeTrace("Réponse backend reçue");
+      pushAnalyzeTrace(
+        `Résultat: valid=${body.valid ? "oui" : "non"}, score=${Math.round(body.score * 100)}%, OCR=${body.ocr_used ? "oui" : "non"} (demandé=${body.ocr_mode_requested}, appliqué=${body.ocr_mode_applied}, tenté=${body.ocr_attempted ? "oui" : "non"}, blocs=${body.ocr_blocks_count})`,
+      );
+      if (body.ocr_error) {
+        pushAnalyzeTrace(`Erreur OCR: ${body.ocr_error}`);
+      }
+      pushAnalyzeTrace(
+        `Champs détectés: ${body.elements_found.length}, manquants: ${body.missing_elements.length}`,
       );
       setResult(body);
     } catch (err) {
+      pushAnalyzeTrace(
+        `Erreur attrapée: ${err instanceof Error ? err.message : "Erreur inconnue"}`,
+      );
       setError(err instanceof Error ? err.message : "Erreur inconnue");
     } finally {
+      pushAnalyzeTrace("Fin de l'analyse");
       setLoading(false);
     }
   };
@@ -289,7 +349,10 @@ export default function Home() {
         `/api/document-engine/config/items/${targetItem}`,
       );
       const cfg = body.config;
-      cfg.required_elements = cfg.required_elements || [];
+      cfg.required_elements = (cfg.required_elements || []).map((entry) => ({
+        ...entry,
+        strategy: entry.strategy || "keyword",
+      }));
       cfg.variant_signatures = cfg.variant_signatures || [];
       cfg.variants = cfg.variants || [];
       setGuidedItemConfig(cfg);
@@ -486,6 +549,39 @@ export default function Home() {
                 />
               </div>
 
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-200">
+                  Mode d&apos;analyse
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAnalyzeOcrMode("native")}
+                    className={`rounded-lg px-3 py-2 text-sm font-semibold ${
+                      analyzeOcrMode === "native"
+                        ? "bg-emerald-400 text-slate-950"
+                        : "bg-slate-800 text-slate-200"
+                    }`}
+                  >
+                    Natif
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAnalyzeOcrMode("ocr")}
+                    className={`rounded-lg px-3 py-2 text-sm font-semibold ${
+                      analyzeOcrMode === "ocr"
+                        ? "bg-emerald-400 text-slate-950"
+                        : "bg-slate-800 text-slate-200"
+                    }`}
+                  >
+                    OCR
+                  </button>
+                </div>
+                <p className="mt-1 text-xs text-slate-400">
+                  Natif = extraction texte PDF. OCR = forcer lecture image/scanner.
+                </p>
+              </div>
+
               <button
                 type="submit"
                 disabled={loading}
@@ -496,6 +592,17 @@ export default function Home() {
 
               {error ? <p className="text-sm text-rose-300">{error}</p> : null}
             </form>
+
+            {analyzeTrace.length > 0 ? (
+              <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                <p className="mb-2 text-xs font-semibold text-slate-300">
+                  Étapes de traitement
+                </p>
+                <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
+                  {analyzeTrace.join("\n")}
+                </pre>
+              </div>
+            ) : null}
 
             {result ? (
               <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
@@ -512,12 +619,58 @@ export default function Home() {
                   {" "}| Seuil: {result.threshold}
                 </p>
                 <p className="mt-1 text-sm text-slate-300">
-                  OCR: {result.ocr_used ? "oui" : "non"} | Temps:{" "}
-                  {result.processing_time_ms} ms
+                  OCR: {result.ocr_used ? "oui" : "non"} (demandé: {result.ocr_mode_requested},
+                  appliqué: {result.ocr_mode_applied}, tenté:{" "}
+                  {result.ocr_attempted ? "oui" : "non"}, blocs:{" "}
+                  {result.ocr_blocks_count}) | Temps: {result.processing_time_ms} ms
                 </p>
+                {result.ocr_error ? (
+                  <p className="mt-1 text-sm text-rose-300">
+                    Erreur OCR: {result.ocr_error}
+                  </p>
+                ) : null}
                 <p className="mt-2 text-sm text-slate-300">
                   Éléments manquants: {result.missing_elements.join(", ") || "aucun"}
                 </p>
+                {result.elements_found.length > 0 ? (
+                  <div className="mt-3">
+                    <p className="text-sm font-medium text-slate-200">Champs détectés</p>
+                    <ul className="mt-1 space-y-1 text-sm text-slate-300">
+                      {result.elements_found.map((entry, idx) => (
+                        <li key={`${entry.name}-${entry.page}-${idx}`}>
+                          <b>{entry.name}</b> (p.{entry.page})
+                          {entry.value ? `: ${entry.value}` : ""}
+                          {entry.value_position ? ` [${entry.value_position}]` : ""}
+                          <div className="pl-3 text-xs text-slate-400">
+                            à droite: {entry.right_text || "—"}
+                          </div>
+                          <div className="pl-3 text-xs text-slate-400">
+                            en dessous: {entry.below_text || "—"}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-3 rounded border border-slate-700/70 bg-slate-900/70 p-3 text-xs text-slate-200">
+                      <p className="font-semibold text-slate-100">
+                        Résumé des champs détectés (valeurs)
+                      </p>
+                      <ul className="mt-2 space-y-1">
+                        {result.elements_found.map((entry, idx) => (
+                          <li key={`summary-${entry.name}-${entry.page}-${idx}`}>
+                            <b>{entry.name}</b>:{" "}
+                            {entry.value ||
+                              entry.target_right_text ||
+                              entry.target_below_text ||
+                              entry.target_text ||
+                              entry.right_text ||
+                              entry.below_text ||
+                              "—"}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </section>
@@ -525,31 +678,60 @@ export default function Home() {
 
         {tab === "config" ? (
           <section className="mt-6 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
-            <h2 className="text-lg font-semibold">Éditeur guidé d&apos;item</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-lg font-semibold">Éditeur guidé d&apos;item</h2>
+              <button
+                type="button"
+                onClick={() => setShowConfigHelp((v) => !v)}
+                className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200"
+              >
+                {showConfigHelp ? "Masquer l'aide" : "Aide paramétrage"}
+              </button>
+            </div>
+
+            {showConfigHelp ? (
+              <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950 p-3 text-xs text-slate-300">
+                <p className="font-semibold text-slate-200">Required elements</p>
+                <p className="mt-1">
+                  <b>Mot clé simple</b>: vérifie la présence du mot/phrase dans le document.
+                </p>
+                <p className="mt-1">
+                  <b>Repérage relatif</b>: trouve un mot-clé ancre, descend de X lignes, puis cherche un mot-clé
+                  cible (mode contient/exact/regex).
+                </p>
+                <p className="mt-1">
+                  Exemple: ancre <code>Raison sociale</code>, <code>X lignes dessous = 1</code>, cible{" "}
+                  <code>OPALHE</code>.
+                </p>
+              </div>
+            ) : null}
 
             <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <select
-                value={guidedItemName}
-                onChange={(e) => {
-                  const nextItem = e.target.value;
-                  setGuidedItemName(nextItem);
-                  loadGuidedItem(nextItem).catch(() => undefined);
-                }}
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-              >
-                {items.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
+              <label className="text-xs text-slate-300">
+                Item
+                <select
+                  value={guidedItemName}
+                  onChange={(e) => {
+                    const nextItem = e.target.value;
+                    setGuidedItemName(nextItem);
+                    loadGuidedItem(nextItem).catch(() => undefined);
+                  }}
+                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                >
+                  {items.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button
                 type="button"
                 onClick={() => {
                   loadGuidedItem().catch(() => undefined);
                 }}
                 disabled={guidedBusy}
-                className="rounded-lg bg-slate-700 px-3 py-2 text-sm"
+                className="self-end rounded-lg bg-slate-700 px-3 py-2 text-sm"
               >
                 Charger item
               </button>
@@ -557,7 +739,7 @@ export default function Home() {
                 type="button"
                 onClick={saveGuidedItem}
                 disabled={guidedBusy || !guidedItemConfig}
-                className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
+                className="self-end rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
               >
                 Sauvegarder item
               </button>
@@ -566,42 +748,49 @@ export default function Home() {
             {guidedItemConfig ? (
               <div className="mt-4 space-y-4 rounded-lg border border-slate-800 bg-slate-950 p-4">
                 <div className="grid gap-3 sm:grid-cols-3">
-                  <input
-                    value={guidedItemConfig.language || "fr"}
-                    onChange={(e) =>
-                      setGuidedItemConfig({ ...guidedItemConfig, language: e.target.value })
-                    }
-                    placeholder="language"
-                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                  />
-                  <input
-                    value={guidedItemConfig.template || "contract"}
-                    onChange={(e) =>
-                      setGuidedItemConfig({ ...guidedItemConfig, template: e.target.value })
-                    }
-                    placeholder="template"
-                    list="template-names"
-                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                  />
+                  <label className="text-xs text-slate-300">
+                    Langue
+                    <input
+                      value={guidedItemConfig.language || "fr"}
+                      onChange={(e) =>
+                        setGuidedItemConfig({ ...guidedItemConfig, language: e.target.value })
+                      }
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="text-xs text-slate-300">
+                    Template
+                    <input
+                      value={guidedItemConfig.template || "contract"}
+                      onChange={(e) =>
+                        setGuidedItemConfig({ ...guidedItemConfig, template: e.target.value })
+                      }
+                      list="template-names"
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                    />
+                  </label>
                   <datalist id="template-names">
                     {templates.map((name) => (
                       <option key={name} value={name} />
                     ))}
                   </datalist>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    max="1"
-                    value={guidedItemConfig.threshold ?? 0.7}
-                    onChange={(e) =>
-                      setGuidedItemConfig({
-                        ...guidedItemConfig,
-                        threshold: Number(e.target.value),
-                      })
-                    }
-                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                  />
+                  <label className="text-xs text-slate-300">
+                    Seuil
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="1"
+                      value={guidedItemConfig.threshold ?? 0.7}
+                      onChange={(e) =>
+                        setGuidedItemConfig({
+                          ...guidedItemConfig,
+                          threshold: Number(e.target.value),
+                        })
+                      }
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                    />
+                  </label>
                 </div>
 
                 <div>
@@ -614,7 +803,7 @@ export default function Home() {
                           ...guidedItemConfig,
                           required_elements: [
                             ...guidedItemConfig.required_elements,
-                            { name: "nouvel_element", weight: 1 },
+                            { name: "nouvel_element", weight: 1, strategy: "keyword" },
                           ],
                         })
                       }
@@ -625,38 +814,179 @@ export default function Home() {
                   </div>
                   <div className="space-y-2">
                     {guidedItemConfig.required_elements.map((element, idx) => (
-                      <div key={`${element.name}-${idx}`} className="grid gap-2 sm:grid-cols-6">
-                        <input
-                          value={element.name}
-                          onChange={(e) => {
-                            const next = [...guidedItemConfig.required_elements];
-                            next[idx] = { ...next[idx], name: e.target.value };
-                            setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                          }}
-                          className="sm:col-span-4 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                        />
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={element.weight}
-                          onChange={(e) => {
-                            const next = [...guidedItemConfig.required_elements];
-                            next[idx] = { ...next[idx], weight: Number(e.target.value) };
-                            setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                          }}
-                          className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const next = guidedItemConfig.required_elements.filter((_, i) => i !== idx);
-                            setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                          }}
-                          className="rounded bg-rose-800 px-2 py-1 text-xs"
-                        >
-                          Suppr
-                        </button>
+                      <div key={`required-${idx}`} className="rounded border border-slate-800 p-3">
+                        <div className="grid gap-2 sm:grid-cols-6">
+                          <label className="sm:col-span-2 text-xs text-slate-300">
+                            Nom de la règle
+                            <input
+                              value={element.name}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.required_elements];
+                                next[idx] = { ...next[idx], name: e.target.value };
+                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                              }}
+                              placeholder="ex: president_nom"
+                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-slate-300">
+                            Stratégie
+                            <select
+                              value={element.strategy || "keyword"}
+                              onChange={(e) => {
+                                const strategy = e.target.value as "keyword" | "relative_anchor";
+                                const next = [...guidedItemConfig.required_elements];
+                                next[idx] =
+                                  strategy === "relative_anchor"
+                                    ? {
+                                        ...next[idx],
+                                        strategy,
+                                        anchor: next[idx].anchor || { keyword: "", occurrence: 1 },
+                                        move: next[idx].move || { lines_below: 1, tolerance: 0 },
+                                        target: next[idx].target || { keyword: "", mode: "contains" },
+                                      }
+                                    : { ...next[idx], strategy };
+                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                              }}
+                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            >
+                              <option value="keyword">Mot clé simple</option>
+                              <option value="relative_anchor">Repérage relatif</option>
+                            </select>
+                          </label>
+                          <label className="text-xs text-slate-300">
+                            Poids
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={element.weight}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.required_elements];
+                                next[idx] = { ...next[idx], weight: Number(e.target.value) };
+                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                              }}
+                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = guidedItemConfig.required_elements.filter((_, i) => i !== idx);
+                              setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                            }}
+                            className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
+                          >
+                            Suppr
+                          </button>
+                        </div>
+
+                        {(element.strategy || "keyword") === "relative_anchor" ? (
+                          <div className="mt-2 grid gap-2 sm:grid-cols-6">
+                            <label className="sm:col-span-2 text-xs text-slate-300">
+                              Mot-clé ancre
+                              <input
+                                value={element.anchor?.keyword || ""}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.required_elements];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    anchor: { ...(next[idx].anchor || {}), keyword: e.target.value },
+                                  };
+                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="text-xs text-slate-300">
+                              Occurrence
+                              <input
+                                type="number"
+                                min="1"
+                                value={element.anchor?.occurrence || 1}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.required_elements];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    anchor: { ...(next[idx].anchor || {}), occurrence: Number(e.target.value) },
+                                  };
+                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="text-xs text-slate-300">
+                              X lignes dessous
+                              <input
+                                type="number"
+                                value={element.move?.lines_below || 0}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.required_elements];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    move: { ...(next[idx].move || {}), lines_below: Number(e.target.value) },
+                                  };
+                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="text-xs text-slate-300">
+                              Tolérance ± lignes
+                              <input
+                                type="number"
+                                min="0"
+                                value={element.move?.tolerance || 0}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.required_elements];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    move: { ...(next[idx].move || {}), tolerance: Number(e.target.value) },
+                                  };
+                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="sm:col-span-2 text-xs text-slate-300">
+                              Mot-clé cible
+                              <input
+                                value={element.target?.keyword || ""}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.required_elements];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    target: { ...(next[idx].target || {}), keyword: e.target.value },
+                                  };
+                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="text-xs text-slate-300">
+                              Mode de match
+                              <select
+                                value={element.target?.mode || "contains"}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.required_elements];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    target: {
+                                      ...(next[idx].target || {}),
+                                      mode: e.target.value as "contains" | "exact" | "regex",
+                                    },
+                                  };
+                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              >
+                                <option value="contains">contient</option>
+                                <option value="exact">exact</option>
+                                <option value="regex">regex</option>
+                              </select>
+                            </label>
+                          </div>
+                        ) : null}
                       </div>
                     ))}
                   </div>
@@ -690,30 +1020,34 @@ export default function Home() {
 
                   <div className="space-y-3">
                     {guidedItemConfig.variant_signatures.map((variant, idx) => (
-                      <div key={`${variant.name}-${idx}`} className="rounded border border-slate-800 p-3">
+                      <div key={`variant-${idx}`} className="rounded border border-slate-800 p-3">
                         <div className="grid gap-2 sm:grid-cols-4">
-                          <input
-                            value={variant.name}
-                            onChange={(e) => {
-                              const next = [...guidedItemConfig.variant_signatures];
-                              next[idx] = { ...next[idx], name: e.target.value };
-                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                            }}
-                            className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            placeholder="name"
-                          />
-                          <input
-                            type="number"
-                            min="1"
-                            value={variant.page_count}
-                            onChange={(e) => {
-                              const next = [...guidedItemConfig.variant_signatures];
-                              next[idx] = { ...next[idx], page_count: Number(e.target.value) };
-                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                            }}
-                            className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            placeholder="page_count"
-                          />
+                          <label className="text-xs text-slate-300">
+                            Nom
+                            <input
+                              value={variant.name}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.variant_signatures];
+                                next[idx] = { ...next[idx], name: e.target.value };
+                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                              }}
+                              className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-slate-300">
+                            Nombre de pages
+                            <input
+                              type="number"
+                              min="1"
+                              value={variant.page_count}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.variant_signatures];
+                                next[idx] = { ...next[idx], page_count: Number(e.target.value) };
+                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                              }}
+                              className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            />
+                          </label>
                           <label className="inline-flex items-center gap-2 text-xs text-slate-300">
                             <input
                               type="checkbox"
@@ -732,43 +1066,47 @@ export default function Home() {
                               const next = guidedItemConfig.variant_signatures.filter((_, i) => i !== idx);
                               setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
                             }}
-                            className="rounded bg-rose-800 px-2 py-1 text-xs"
+                            className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
                           >
                             Suppr
                           </button>
                         </div>
-                        <input
-                          value={variant.dominant_keywords.join(", ")}
-                          onChange={(e) => {
-                            const next = [...guidedItemConfig.variant_signatures];
-                            next[idx] = {
-                              ...next[idx],
-                              dominant_keywords: e.target.value
-                                .split(",")
-                                .map((v) => v.trim())
-                                .filter(Boolean),
-                            };
-                            setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                          }}
-                          className="mt-2 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                          placeholder="dominant_keywords (comma-separated)"
-                        />
-                        <input
-                          value={variant.title_patterns.join(", ")}
-                          onChange={(e) => {
-                            const next = [...guidedItemConfig.variant_signatures];
-                            next[idx] = {
-                              ...next[idx],
-                              title_patterns: e.target.value
-                                .split(",")
-                                .map((v) => v.trim())
-                                .filter(Boolean),
-                            };
-                            setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                          }}
-                          className="mt-2 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                          placeholder="title_patterns (comma-separated)"
-                        />
+                        <label className="mt-2 block text-xs text-slate-300">
+                          Mots-clés dominants (séparés par virgule)
+                          <input
+                            value={variant.dominant_keywords.join(", ")}
+                            onChange={(e) => {
+                              const next = [...guidedItemConfig.variant_signatures];
+                              next[idx] = {
+                                ...next[idx],
+                                dominant_keywords: e.target.value
+                                  .split(",")
+                                  .map((v) => v.trim())
+                                  .filter(Boolean),
+                              };
+                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                            }}
+                            className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                          />
+                        </label>
+                        <label className="mt-2 block text-xs text-slate-300">
+                          Titres repères (séparés par virgule)
+                          <input
+                            value={variant.title_patterns.join(", ")}
+                            onChange={(e) => {
+                              const next = [...guidedItemConfig.variant_signatures];
+                              next[idx] = {
+                                ...next[idx],
+                                title_patterns: e.target.value
+                                  .split(",")
+                                  .map((v) => v.trim())
+                                  .filter(Boolean),
+                              };
+                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                            }}
+                            className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                          />
+                        </label>
                       </div>
                     ))}
                   </div>
@@ -793,32 +1131,38 @@ export default function Home() {
             {showAdvancedConfig ? (
               <div className="mt-4">
                 <div className="grid gap-3 sm:grid-cols-3">
-                  <select
-                    value={configKind}
-                    onChange={(e) => setConfigKind(e.target.value as ConfigKind)}
-                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-                  >
-                    <option value="item">item</option>
-                    <option value="template">template</option>
-                    <option value="global">global rules</option>
-                  </select>
+                  <label className="text-xs text-slate-300">
+                    Type de configuration
+                    <select
+                      value={configKind}
+                      onChange={(e) => setConfigKind(e.target.value as ConfigKind)}
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                    >
+                      <option value="item">item</option>
+                      <option value="template">template</option>
+                      <option value="global">global rules</option>
+                    </select>
+                  </label>
 
-                  <select
-                    value={configKind === "global" ? "rules" : configName}
-                    onChange={(e) => setConfigName(e.target.value)}
-                    disabled={configKind === "global"}
-                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm disabled:opacity-40"
-                  >
-                    {configKind === "global" ? (
-                      <option value="rules">rules</option>
-                    ) : (
-                      optionList.map((name) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                  <label className="text-xs text-slate-300">
+                    Nom
+                    <select
+                      value={configKind === "global" ? "rules" : configName}
+                      onChange={(e) => setConfigName(e.target.value)}
+                      disabled={configKind === "global"}
+                      className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm disabled:opacity-40"
+                    >
+                      {configKind === "global" ? (
+                        <option value="rules">rules</option>
+                      ) : (
+                        optionList.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
 
                   <div className="flex gap-2">
                     <button
@@ -840,11 +1184,14 @@ export default function Home() {
                   </div>
                 </div>
 
-                <textarea
-                  value={configText}
-                  onChange={(e) => setConfigText(e.target.value)}
-                  className="mt-4 min-h-[320px] w-full rounded-lg border border-slate-700 bg-slate-950 p-3 font-mono text-xs"
-                />
+                <label className="mt-4 block text-xs text-slate-300">
+                  JSON configuration
+                  <textarea
+                    value={configText}
+                    onChange={(e) => setConfigText(e.target.value)}
+                    className="mt-1 min-h-[320px] w-full rounded-lg border border-slate-700 bg-slate-950 p-3 font-mono text-xs"
+                  />
+                </label>
                 {configMessage ? (
                   <p className="mt-2 text-sm text-slate-300">{configMessage}</p>
                 ) : null}
@@ -856,37 +1203,46 @@ export default function Home() {
         {tab === "training" ? (
           <section className="mt-6 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="grid gap-3 sm:grid-cols-2">
-              <input
-                value={trainingItem}
-                onChange={(e) => setTrainingItem(e.target.value)}
-                placeholder="nouvel_item"
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-              />
-              <select
-                value={trainingTemplate}
-                onChange={(e) => setTrainingTemplate(e.target.value)}
-                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-              >
-                {templates.length === 0 ? (
-                  <option value="contract">contract</option>
-                ) : (
-                  templates.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))
-                )}
-              </select>
+              <label className="text-xs text-slate-300">
+                Nom de l&apos;item
+                <input
+                  value={trainingItem}
+                  onChange={(e) => setTrainingItem(e.target.value)}
+                  placeholder="nouvel_item"
+                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="text-xs text-slate-300">
+                Template
+                <select
+                  value={trainingTemplate}
+                  onChange={(e) => setTrainingTemplate(e.target.value)}
+                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                >
+                  {templates.length === 0 ? (
+                    <option value="contract">contract</option>
+                  ) : (
+                    templates.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
             </div>
 
-            <input
-              ref={trainingInputRef}
-              type="file"
-              accept="application/pdf"
-              multiple
-              onChange={onTrainingFiles}
-              className="mt-4 block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-950"
-            />
+            <label className="mt-4 block text-xs text-slate-300">
+              Documents PDF (multi-sélection)
+              <input
+                ref={trainingInputRef}
+                type="file"
+                accept="application/pdf"
+                multiple
+                onChange={onTrainingFiles}
+                className="mt-1 block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-950"
+              />
+            </label>
             <p className="mt-2 text-xs text-slate-400">
               {trainingFiles.length} PDF sélectionné(s)
             </p>

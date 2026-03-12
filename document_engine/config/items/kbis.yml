@@ -3,18 +3,36 @@ language: fr
 template: contract
 threshold: 0.7
 required_elements:
-- name: immatriculation
+- name: immatriculation au RCS, numéro
   weight: 1
-- name: personne
+  strategy: keyword
+- name: date d'immatriculation
   weight: 1
-- name: morale
+  strategy: keyword
+- name: dénomination ou raison sociale
   weight: 1
-- name: activite
+  strategy: keyword
+- name: sigle
   weight: 1
-- name: etablissement
+  strategy: keyword
+- name: forme juridique
   weight: 1
-- name: principal
+  strategy: keyword
+- name: capital
   weight: 1
+  strategy: keyword
+- name: president_nom
+  weight: 1
+  strategy: relative_anchor
+  anchor:
+    keyword: Gestion, direction
+    occurrence: 1
+  move:
+    lines_below: 2
+    tolerance: 1
+  target:
+    keyword: nom
+    mode: contains
 variants:
 - kbis_v1
 variant_signatures:
@@ -42,4 +60,4 @@ variant_signatures:
 audit:
   sample_count: 5
   page_distribution:
-    2: 5
+    '2': 5

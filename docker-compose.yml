@@ -7,16 +7,23 @@ services:
       echo "package.json absent dans /app. Initialise le projet (ex: npx create-next-app .) puis relance.";
       sleep infinity;
       else
-      npm ci || npm install;
-      npm run dev -- -p 8085 -H 0.0.0.0;
+      npm ci --include=dev || npm install;
+      npm run build;
+      npm run start -- -p 8085 -H 0.0.0.0;
       fi'
     environment:
-      NODE_ENV: development
+      NODE_ENV: production
       DOCUMENT_ENGINE_URL: http://document_engine:8090
     volumes:
       - ./:/app
     ports:
       - "127.0.0.1:8085:8085"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8085/"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   document_engine:

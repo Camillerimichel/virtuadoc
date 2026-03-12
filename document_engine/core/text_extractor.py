@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from io import BytesIO
+from typing import Iterator
 
 from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTTextContainer
+from pdfminer.layout import LTTextContainer, LTTextLine
 
 from document_engine.model_types import TextBlock
 
@@ -19,21 +20,53 @@ class TextExtractor:
             for element in page_layout:
                 if not isinstance(element, LTTextContainer):
                     continue
-                text = " ".join(element.get_text().split())
-                if not text:
-                    continue
-                x0, y0, x1, y1 = element.bbox
-                blocks.append(
-                    TextBlock(
-                        text=text,
-                        page=page_idx,
-                        x0=float(x0),
-                        y0=float(y0),
-                        x1=float(x1),
-                        y1=float(y1),
+                line_added = False
+                for line in self._iter_lines(element):
+                    text = " ".join(line.get_text().split())
+                    if not text:
+                        continue
+                    x0, y0, x1, y1 = line.bbox
+                    blocks.append(
+                        TextBlock(
+                            text=text,
+                            page=page_idx,
+                            x0=float(x0),
+                            y0=float(y0),
+                            x1=float(x1),
+                            y1=float(y1),
+                        )
                     )
-                )
-                text_parts.append(text)
+                    text_parts.append(text)
+                    line_added = True
+
+                # Fallback: if no line object was extracted, keep container-level text.
+                if not line_added:
+                    text = " ".join(element.get_text().split())
+                    if not text:
+                        continue
+                    x0, y0, x1, y1 = element.bbox
+                    blocks.append(
+                        TextBlock(
+                            text=text,
+                            page=page_idx,
+                            x0=float(x0),
+                            y0=float(y0),
+                            x1=float(x1),
+                            y1=float(y1),
+                        )
+                    )
+                    text_parts.append(text)
 
         full_text = "\n".join(text_parts)
         return full_text, blocks, page_count
+
+    def _iter_lines(self, node: object) -> Iterator[LTTextLine]:
+        if isinstance(node, LTTextLine):
+            yield node
+            return
+
+        children = getattr(node, "_objs", None)
+        if not children:
+            return
+        for child in children:
+            yield from self._iter_lines(child)
