@@ -169,6 +169,9 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [analyzeTrace, setAnalyzeTrace] = useState<string[]>([]);
+  const [showAnalyzeTrace, setShowAnalyzeTrace] = useState(false);
+  const [showAnalyzeDetectedFields, setShowAnalyzeDetectedFields] = useState(false);
+  const [showAnalyzeDebug, setShowAnalyzeDebug] = useState(false);
 
   const [configKind, setConfigKind] = useState<ConfigKind>("item");
   const [configName, setConfigName] = useState("contrat_assurance_vie");
@@ -184,7 +187,6 @@ export default function Home() {
   const [showConfigHelp, setShowConfigHelp] = useState(false);
 
   const [trainingItem, setTrainingItem] = useState("nouvel_item");
-  const [trainingTemplate, setTrainingTemplate] = useState("contract");
   const [trainingExcelHeaderAxis, setTrainingExcelHeaderAxis] =
     useState<"first_row" | "first_column">("first_row");
   const [trainingFiles, setTrainingFiles] = useState<File[]>([]);
@@ -192,6 +194,8 @@ export default function Home() {
   const [trainingMessage, setTrainingMessage] = useState<string | null>(null);
   const [trainingTrace, setTrainingTrace] = useState<string[]>([]);
   const [trainingResult, setTrainingResult] = useState<TrainingBuildResponse | null>(null);
+  const [showTrainingResult, setShowTrainingResult] = useState(false);
+  const [showTrainingDebug, setShowTrainingDebug] = useState(false);
   const trainingInputRef = useRef<HTMLInputElement | null>(null);
 
   const scorePercent = useMemo(() => {
@@ -236,13 +240,6 @@ export default function Home() {
     }
   }, [configKind, configName, items, templates]);
 
-  useEffect(() => {
-    if (templates.length === 0) return;
-    if (!templates.includes(trainingTemplate)) {
-      setTrainingTemplate(templates[0]);
-    }
-  }, [templates, trainingTemplate]);
-
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null;
     const nextType = nextFile ? detectDocumentType(nextFile) : null;
@@ -260,6 +257,9 @@ export default function Home() {
     setResult(null);
     setError(null);
     setAnalyzeTrace([]);
+    setShowAnalyzeTrace(false);
+    setShowAnalyzeDetectedFields(false);
+    setShowAnalyzeDebug(false);
   };
 
   const pushAnalyzeTrace = (message: string) => {
@@ -272,11 +272,15 @@ export default function Home() {
     setError(null);
     setResult(null);
     setAnalyzeTrace([]);
+    setShowAnalyzeTrace(true);
+    setShowAnalyzeDetectedFields(false);
+    setShowAnalyzeDebug(false);
     pushAnalyzeTrace("Début de l'analyse");
 
     if (!file) {
       pushAnalyzeTrace("Validation échouée: aucun fichier sélectionné");
       setError("Sélectionne un fichier (PDF ou Excel) avant de lancer l'analyse.");
+      setShowAnalyzeTrace(false);
       return;
     }
 
@@ -284,6 +288,7 @@ export default function Home() {
     if (!documentType) {
       pushAnalyzeTrace(`Validation échouée: type invalide (${file.type || "inconnu"})`);
       setError("Le fichier doit être un PDF, XLSX ou XLSM.");
+      setShowAnalyzeTrace(false);
       return;
     }
 
@@ -333,6 +338,7 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
     } finally {
       pushAnalyzeTrace("Fin de l'analyse");
+      setShowAnalyzeTrace(false);
       setLoading(false);
     }
   };
@@ -468,6 +474,8 @@ export default function Home() {
     setTrainingMessage(null);
     setTrainingTrace([]);
     setTrainingResult(null);
+    setShowTrainingResult(false);
+    setShowTrainingDebug(false);
     try {
       pushTrainingTrace("Début du training");
       if (trainingFiles.length < 3) {
@@ -502,7 +510,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           item: trainingItem,
-          template: trainingTemplate,
+          template: "contract",
           language: "fr",
           threshold: 0.7,
           documents: docs,
@@ -532,6 +540,8 @@ export default function Home() {
       pushTrainingTrace("Backend OK, rafraîchissement des listes");
       const result = parsedBody as TrainingBuildResponse;
       setTrainingResult(result);
+      setShowTrainingResult(false);
+      setShowTrainingDebug(false);
       setGuidedItemConfig(result.config);
       await refreshLists();
       clearTrainingFiles();
@@ -685,38 +695,52 @@ export default function Home() {
 
             {analyzeTrace.length > 0 ? (
               <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-3">
-                <p className="mb-2 text-xs font-semibold text-slate-300">
-                  Étapes de traitement
-                </p>
-                <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
-                  {analyzeTrace.join("\n")}
-                </pre>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold text-slate-300">Étapes de traitement</p>
+                  <button
+                    type="button"
+                    onClick={() => setShowAnalyzeTrace((v) => !v)}
+                    className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200"
+                  >
+                    {showAnalyzeTrace ? "Masquer" : "Afficher"}
+                  </button>
+                </div>
+                {showAnalyzeTrace ? (
+                  <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
+                    {analyzeTrace.join("\n")}
+                  </pre>
+                ) : null}
               </div>
             ) : null}
 
             {result ? (
               <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
-                <p className="text-sm text-slate-300">
-                  Score: <b>{scorePercent}%</b> | Validité:{" "}
-                  <b>{result.valid ? "valide" : "invalide"}</b>
-                </p>
-                <p className="mt-1 text-sm text-slate-300">
-                  Variant: <b>{result.variant_detected || "non détectée"}</b>
-                  {" "}(score {result.variant_score.toFixed(2)})
-                </p>
-                <p className="mt-1 text-sm text-slate-300">
-                  Poids détecté: <b>{result.matched_weight_sum}</b> / {result.total_weight_sum}
-                  {" "}| Seuil: {result.threshold}
-                </p>
-                <p className="mt-1 text-sm text-slate-300">
-                  Type de document: <b>{result.document_type}</b>
-                </p>
-                <p className="mt-1 text-sm text-slate-300">
-                  OCR: {result.ocr_used ? "oui" : "non"} (demandé: {result.ocr_mode_requested},
-                  appliqué: {result.ocr_mode_applied}, tenté:{" "}
-                  {result.ocr_attempted ? "oui" : "non"}, blocs:{" "}
-                  {result.ocr_blocks_count}) | Temps: {result.processing_time_ms} ms
-                </p>
+                <p className="text-sm font-semibold text-slate-200">Score</p>
+                <div className="mt-2 space-y-1 text-sm text-slate-300">
+                  <p>
+                    Score global: <b>{scorePercent}%</b>
+                  </p>
+                  <p>
+                    Validité: <b>{result.valid ? "valide" : "invalide"}</b>
+                  </p>
+                  <p>
+                    Variant: <b>{result.variant_detected || "non détectée"}</b> (score{" "}
+                    {result.variant_score.toFixed(2)})
+                  </p>
+                  <p>
+                    Poids détecté: <b>{result.matched_weight_sum}</b> / {result.total_weight_sum}
+                    {" "}| Seuil: {result.threshold}
+                  </p>
+                  <p>
+                    Type de document: <b>{result.document_type}</b>
+                  </p>
+                  <p>
+                    OCR: {result.ocr_used ? "oui" : "non"} (demandé: {result.ocr_mode_requested},
+                    appliqué: {result.ocr_mode_applied}, tenté:{" "}
+                    {result.ocr_attempted ? "oui" : "non"}, blocs:{" "}
+                    {result.ocr_blocks_count}) | Temps: {result.processing_time_ms} ms
+                  </p>
+                </div>
                 {result.ocr_error ? (
                   <p className="mt-1 text-sm text-rose-300">
                     Erreur OCR: {result.ocr_error}
@@ -727,22 +751,33 @@ export default function Home() {
                 </p>
                 {result.elements_found.length > 0 ? (
                   <div className="mt-3">
-                    <p className="text-sm font-medium text-slate-200">Champs détectés</p>
-                    <ul className="mt-1 space-y-1 text-sm text-slate-300">
-                      {result.elements_found.map((entry, idx) => (
-                        <li key={`${entry.name}-${entry.page}-${idx}`}>
-                          <b>{entry.name}</b> (p.{entry.page})
-                          {entry.value ? `: ${entry.value}` : ""}
-                          {entry.value_position ? ` [${entry.value_position}]` : ""}
-                          <div className="pl-3 text-xs text-slate-400">
-                            à droite: {entry.right_text || "—"}
-                          </div>
-                          <div className="pl-3 text-xs text-slate-400">
-                            en dessous: {entry.below_text || "—"}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-medium text-slate-200">Champs détectés</p>
+                      <button
+                        type="button"
+                        onClick={() => setShowAnalyzeDetectedFields((v) => !v)}
+                        className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200"
+                      >
+                        {showAnalyzeDetectedFields ? "Masquer" : "Afficher"}
+                      </button>
+                    </div>
+                    {showAnalyzeDetectedFields ? (
+                      <ul className="mt-1 space-y-1 text-sm text-slate-300">
+                        {result.elements_found.map((entry, idx) => (
+                          <li key={`${entry.name}-${entry.page}-${idx}`}>
+                            <b>{entry.name}</b> (p.{entry.page})
+                            {entry.value ? `: ${entry.value}` : ""}
+                            {entry.value_position ? ` [${entry.value_position}]` : ""}
+                            <div className="pl-3 text-xs text-slate-400">
+                              à droite: {entry.right_text || "—"}
+                            </div>
+                            <div className="pl-3 text-xs text-slate-400">
+                              en dessous: {entry.below_text || "—"}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
                     <div className="mt-3 rounded border border-slate-700/70 bg-slate-900/70 p-3 text-xs text-slate-200">
                       <p className="font-semibold text-slate-100">
                         Résumé des champs détectés (valeurs)
@@ -766,18 +801,29 @@ export default function Home() {
                 ) : null}
                 {result.document_type === "excel" ? (
                   <div className="mt-3 rounded border border-slate-700/70 bg-slate-950/60 p-3 text-xs text-slate-200">
-                    <p className="font-semibold text-slate-100">
-                      Debug Excel: paires détectées (intitulé: valeur)
-                    </p>
-                    {result.excel_pairs_preview.length > 0 ? (
-                      <ul className="mt-2 space-y-1">
-                        {result.excel_pairs_preview.map((line, idx) => (
-                          <li key={`excel-pair-${idx}`}>{line}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mt-2 text-slate-400">Aucune paire détectée.</p>
-                    )}
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-semibold text-slate-100">
+                        Debug Excel: paires détectées (intitulé: valeur)
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setShowAnalyzeDebug((v) => !v)}
+                        className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200"
+                      >
+                        {showAnalyzeDebug ? "Masquer" : "Afficher"}
+                      </button>
+                    </div>
+                    {showAnalyzeDebug ? (
+                      result.excel_pairs_preview.length > 0 ? (
+                        <ul className="mt-2 space-y-1">
+                          {result.excel_pairs_preview.map((line, idx) => (
+                            <li key={`excel-pair-${idx}`}>{line}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-slate-400">Aucune paire détectée.</p>
+                      )
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1321,24 +1367,6 @@ export default function Home() {
                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
                 />
               </label>
-              <label className="text-xs text-slate-300">
-                Template
-                <select
-                  value={trainingTemplate}
-                  onChange={(e) => setTrainingTemplate(e.target.value)}
-                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-                >
-                  {templates.length === 0 ? (
-                    <option value="contract">contract</option>
-                  ) : (
-                    templates.map((name) => (
-                      <option key={name} value={name}>
-                        {name}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </label>
             </div>
 
             <label className="mt-4 block text-xs text-slate-300">
@@ -1409,29 +1437,53 @@ export default function Home() {
 
             {trainingResult ? (
               <div className="mt-3 rounded-lg border border-emerald-700/50 bg-emerald-950/20 p-3">
-                <p className="text-xs text-emerald-200">
-                  Résultat: item <b>{trainingResult.item}</b> sauvegardé dans{" "}
-                  <code>{trainingResult.saved_to}</code>
-                </p>
-                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-emerald-100">
-                  {JSON.stringify(trainingResult.config, null, 2)}
-                </pre>
-                {trainingResult.config.audit?.document_type === "excel" ? (
-                  <div className="mt-3 rounded border border-emerald-700/50 bg-slate-950/60 p-3 text-xs text-emerald-100">
-                    <p className="font-semibold">
-                      Debug Excel (training): paires détectées (intitulé: valeur)
-                    </p>
-                    {trainingResult.config.audit?.excel_pairs_preview &&
-                    trainingResult.config.audit.excel_pairs_preview.length > 0 ? (
-                      <ul className="mt-2 space-y-1">
-                        {trainingResult.config.audit.excel_pairs_preview.map((line, idx) => (
-                          <li key={`training-excel-pair-${idx}`}>{line}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mt-2 text-emerald-200/80">Aucune paire détectée.</p>
-                    )}
-                  </div>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-emerald-200">
+                    Résultat: item <b>{trainingResult.item}</b> sauvegardé dans{" "}
+                    <code>{trainingResult.saved_to}</code>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowTrainingResult((v) => !v)}
+                    className="rounded-lg bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100"
+                  >
+                    {showTrainingResult ? "Masquer" : "Afficher"}
+                  </button>
+                </div>
+                {showTrainingResult ? (
+                  <>
+                    <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-emerald-100">
+                      {JSON.stringify(trainingResult.config, null, 2)}
+                    </pre>
+                    {trainingResult.config.audit?.document_type === "excel" ? (
+                      <div className="mt-3 rounded border border-emerald-700/50 bg-slate-950/60 p-3 text-xs text-emerald-100">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-semibold">
+                            Debug Excel (training): paires détectées (intitulé: valeur)
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => setShowTrainingDebug((v) => !v)}
+                            className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200"
+                          >
+                            {showTrainingDebug ? "Masquer" : "Afficher"}
+                          </button>
+                        </div>
+                        {showTrainingDebug ? (
+                          trainingResult.config.audit?.excel_pairs_preview &&
+                          trainingResult.config.audit.excel_pairs_preview.length > 0 ? (
+                            <ul className="mt-2 space-y-1">
+                              {trainingResult.config.audit.excel_pairs_preview.map((line, idx) => (
+                                <li key={`training-excel-pair-${idx}`}>{line}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mt-2 text-emerald-200/80">Aucune paire détectée.</p>
+                          )
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
               </div>
             ) : null}

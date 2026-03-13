@@ -164,13 +164,17 @@ class ItemBuilder:
             if ":" not in text:
                 continue
             left = text.split(":", 1)[0].strip()
-            normalized = self._normalize_excel_label(left)
-            if normalized:
-                labels.append(normalized)
+            display_label = self._clean_excel_label(left)
+            normalized = self._normalize_excel_label(display_label)
+            if normalized and display_label:
+                labels.append(display_label)
         return labels
 
+    def _clean_excel_label(self, label: str) -> str:
+        return " ".join(label.split()).strip(" .:-\t")
+
     def _normalize_excel_label(self, label: str) -> str:
-        cleaned = " ".join(label.split()).strip(" .:-\t")
+        cleaned = self._clean_excel_label(label)
         if len(cleaned) < 2:
             return ""
 
@@ -187,9 +191,12 @@ class ItemBuilder:
 
     def _build_required_elements_from_excel_labels(self, labels: list[str]) -> list[dict]:
         deduped: list[str] = []
+        seen_keys: set[str] = set()
         for label in labels:
-            if not label or label in deduped:
+            normalized = self._normalize_excel_label(label)
+            if not label or not normalized or normalized in seen_keys:
                 continue
+            seen_keys.add(normalized)
             deduped.append(label)
         top = deduped[:10]
         if not top:

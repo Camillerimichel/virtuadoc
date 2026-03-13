@@ -15,7 +15,7 @@ def _excel_b64_with_pairs() -> str:
     ws["B1"] = "Jean Dupont"
     ws["A2"] = "Prénom"
     ws["B2"] = "Jean"
-    ws["A3"] = "SRRI"
+    ws["A3"] = "Numéro de dossier"
     ws["B3"] = 3
 
     buffer = BytesIO()
@@ -37,8 +37,8 @@ def test_item_builder_excel_uses_labels_for_required_elements() -> None:
     )
 
     names = [entry["name"] for entry in config["required_elements"]]
-    assert "nom" in names
-    assert "prenom" in names
-    assert "srri" in names
+    assert "Nom" in names
+    assert "Prénom" in names
+    assert "Numéro de dossier" in names
     assert config["audit"]["document_type"] == "excel"
     assert config["audit"]["excel_pairs_preview"]
