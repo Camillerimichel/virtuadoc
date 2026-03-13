@@ -4,7 +4,7 @@ import base64
 from pathlib import Path
 
 from document_engine.analyzer.pipeline import AnalyzePipeline
-from document_engine.model_types import OcrBlock, TextBlock
+from document_engine.model_types import DetectionResult, OcrBlock, TextBlock
 
 
 def test_auto_mode_retries_with_ocr_when_native_detection_is_weak(
@@ -151,3 +151,26 @@ def test_filters_diagonal_ocr_watermark_without_dropping_horizontal_field() -> N
     filtered = pipeline._filter_watermark_ocr_blocks([diagonal_watermark, horizontal_field])
 
     assert [block.text for block in filtered] == ["Date : 01/02/2026"]
+
+
+def test_auto_mode_retries_with_ocr_when_native_values_look_like_labels() -> None:
+    pipeline = AnalyzePipeline(config_dir=Path("/var/www/VirtuaDoc/document_engine/config"))
+    required_elements = [
+        {"name": "Nom", "weight": 1},
+        {"name": "Prénom", "weight": 1},
+        {"name": "Date de naissance", "weight": 1},
+    ]
+    detections = [
+        DetectionResult(name="Nom", page=1, evidence="text-match", meta={"field_value": "Prénom"}),
+        DetectionResult(name="Prénom", page=1, evidence="text-match", meta={"field_value": "Date de naissance"}),
+        DetectionResult(name="Date de naissance", page=1, evidence="text-match", meta={"field_value": "_______"}),
+    ]
+
+    assert pipeline._should_retry_with_ocr(
+        full_text="Texte natif suffisamment long " * 20,
+        text_blocks=[object()] * 12,
+        required_elements=required_elements,
+        detections=detections,
+        completeness_score=1.0,
+        threshold=0.7,
+    ) is True

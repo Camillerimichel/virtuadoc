@@ -19,6 +19,119 @@ def test_extracts_value_on_right_of_label() -> None:
     assert detections[0].meta.get("right_text") == "RCS Paris 123 456 789"
 
 
+def test_ignores_horizontal_entry_line_when_picking_right_value() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="label", x0=10, y0=700, x1=140, y1=720, text="Nom"),
+        LayoutZone(page=1, zone_type="paragraph", x0=170, y0=700, x1=260, y1=720, text="___________"),
+        LayoutZone(page=1, zone_type="paragraph", x0=275, y0=700, x1=420, y1=720, text="Jean Dupont"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[{"name": "nom", "weight": 1}],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].meta.get("field_value") == "Jean Dupont"
+    assert detections[0].meta.get("right_text") == "Jean Dupont"
+
+
+def test_rejects_other_field_label_as_value() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="label", x0=10, y0=700, x1=140, y1=720, text="Prénom"),
+        LayoutZone(page=1, zone_type="paragraph", x0=10, y0=670, x1=240, y1=690, text="Date de naissance"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[
+            {"name": "Prénom", "weight": 1},
+            {"name": "Date de naissance", "weight": 1},
+        ],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 2
+    values = {d.name: d.meta.get("field_value") for d in detections}
+    assert values["Prénom"] is None
+
+
+def test_keyword_rule_can_be_limited_to_specific_pages() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="label", x0=10, y0=700, x1=140, y1=720, text="Nom"),
+        LayoutZone(page=1, zone_type="paragraph", x0=170, y0=700, x1=320, y1=720, text="Assuré"),
+        LayoutZone(page=3, zone_type="label", x0=10, y0=700, x1=140, y1=720, text="Nom"),
+        LayoutZone(page=3, zone_type="paragraph", x0=170, y0=700, x1=320, y1=720, text="FARGES"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[{"name": "Nom", "weight": 1, "pages": "3"}],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].page == 3
+    assert detections[0].meta.get("field_value") == "FARGES"
+
+
+def test_keyword_rule_can_use_exact_match_mode() -> None:
+    zones = [
+        LayoutZone(page=3, zone_type="label", x0=10, y0=700, x1=180, y1=720, text="Pays de naissance"),
+        LayoutZone(page=3, zone_type="paragraph", x0=220, y0=700, x1=320, y1=720, text="France"),
+        LayoutZone(page=3, zone_type="label", x0=10, y0=660, x1=80, y1=680, text="Pays"),
+        LayoutZone(page=3, zone_type="paragraph", x0=220, y0=660, x1=320, y1=680, text="Andorre"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[{"name": "Pays", "weight": 1, "match_mode": "exact"}],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].meta.get("field_value") == "Andorre"
+
+
+def test_rejects_parenthetical_and_checkbox_candidates_as_values() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="label", x0=10, y0=700, x1=70, y1=720, text="Nom"),
+        LayoutZone(page=1, zone_type="paragraph", x0=110, y0=700, x1=190, y1=720, text="(n° de proposition)"),
+        LayoutZone(page=1, zone_type="paragraph", x0=210, y0=700, x1=300, y1=720, text="FARGES"),
+        LayoutZone(page=1, zone_type="label", x0=10, y0=660, x1=70, y1=680, text="Ville"),
+        LayoutZone(page=1, zone_type="paragraph", x0=110, y0=660, x1=220, y1=680, text=" M.  Mme"),
+        LayoutZone(page=1, zone_type="paragraph", x0=230, y0=660, x1=360, y1=680, text="TERRA MAJOR"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[
+            {"name": "Nom", "weight": 1, "match_mode": "exact"},
+            {"name": "Ville", "weight": 1, "match_mode": "exact"},
+        ],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    values = {d.name: d.meta.get("field_value") for d in detections}
+    assert values["Nom"] == "FARGES"
+    assert values["Ville"] == "TERRA MAJOR"
+
+
+def test_follows_multiline_label_to_value_on_right_of_sub_label() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="label", x0=10, y0=500, x1=180, y1=520, text="Numéro d’identification"),
+        LayoutZone(page=1, zone_type="paragraph", x0=10, y0=475, x1=120, y1=495, text="fiscale (NIF)*"),
+        LayoutZone(page=1, zone_type="paragraph", x0=210, y0=475, x1=340, y1=495, text="0648333597303"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[{"name": "Numéro d’identification", "weight": 1, "match_mode": "exact"}],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].meta.get("field_value") == "0648333597303"
+    assert detections[0].meta.get("value_position") == "below_right"
+    assert detections[0].meta.get("below_text") == "fiscale (NIF)*"
+    assert detections[0].meta.get("below_right_text") == "0648333597303"
+
+
 def test_extracts_inline_value_after_colon() -> None:
     zones = [
         LayoutZone(
@@ -213,3 +326,33 @@ def test_relative_anchor_accepts_native_label_with_small_left_shift() -> None:
     assert len(detections) == 1
     assert detections[0].meta.get("target_text") == "Nom, prénoms"
     assert detections[0].meta.get("field_value") == "CAMILLERI Michel Rosario"
+
+
+def test_relative_anchor_can_be_limited_to_specific_pages() -> None:
+    zones = [
+        LayoutZone(page=2, zone_type="paragraph", x0=20, y0=740, x1=260, y1=760, text="Souscripteur"),
+        LayoutZone(page=2, zone_type="paragraph", x0=20, y0=710, x1=140, y1=730, text="Nom"),
+        LayoutZone(page=2, zone_type="paragraph", x0=220, y0=710, x1=360, y1=730, text="ASSURE"),
+        LayoutZone(page=3, zone_type="paragraph", x0=20, y0=740, x1=260, y1=760, text="Souscripteur"),
+        LayoutZone(page=3, zone_type="paragraph", x0=20, y0=710, x1=140, y1=730, text="Nom"),
+        LayoutZone(page=3, zone_type="paragraph", x0=220, y0=710, x1=360, y1=730, text="FARGES"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[
+            {
+                "name": "Nom",
+                "weight": 1,
+                "pages": "3",
+                "strategy": "relative_anchor",
+                "anchor": {"keyword": "Souscripteur", "occurrence": 1},
+                "move": {"lines_below": 1, "tolerance": 0},
+                "target": {"keyword": "Nom", "mode": "contains"},
+            }
+        ],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].page == 3
+    assert detections[0].meta.get("field_value") == "FARGES"

@@ -17,6 +17,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gcc g++ \
         libgl1 \
         libglib2.0-0 \
+        poppler-utils \
         libsm6 \
         libxext6 \
         libxrender1 \

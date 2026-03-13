@@ -6,6 +6,8 @@ import time
 import uuid
 from pathlib import Path
 
+from rapidfuzz import fuzz
+
 from document_engine.analyzer.element_detector import ElementDetector
 from document_engine.analyzer.scoring_engine import ScoringEngine
 from document_engine.analyzer.structure_detector import StructureDetector
@@ -284,10 +286,46 @@ class AnalyzePipeline:
         if not required_elements:
             return False
 
+        extraction_weakness_ratio = self._extraction_weakness_ratio(required_elements, detections)
+        if extraction_weakness_ratio >= 0.3:
+            return True
+
         missing_count = max(len(required_elements) - len(detections), 0)
         missing_ratio = missing_count / len(required_elements)
         effective_threshold = min(max(threshold, 0.45), 0.85)
         return completeness_score < effective_threshold and missing_ratio >= 0.3
+
+    def _extraction_weakness_ratio(self, required_elements: list[dict], detections: list) -> float:
+        field_names = {
+            " ".join(str(element.get("name", "")).lower().split())
+            for element in required_elements
+            if str(element.get("name", "")).strip()
+        }
+        total_expected = len(required_elements)
+        if total_expected == 0:
+            return 0.0
+
+        weak_count = 0
+        for detection in detections:
+            value = " ".join(str(detection.meta.get("field_value", "")).split()).strip().lower()
+            if not value:
+                weak_count += 1
+                continue
+            if re.fullmatch(r"[_\-.=~/\\|: ]{4,}(?:euros?)?", value):
+                weak_count += 1
+                continue
+            if any(
+                value == field_name
+                or value in field_name
+                or field_name in value
+                or fuzz.partial_ratio(value, field_name) >= 92
+                for field_name in field_names
+            ):
+                weak_count += 1
+
+        missing_detection_count = max(total_expected - len(detections), 0)
+        weak_count += missing_detection_count
+        return weak_count / total_expected
 
     def _filter_watermark_text_blocks(self, text_blocks: list[TextBlock]) -> list[TextBlock]:
         return [block for block in text_blocks if not self._is_watermark_candidate(block, text_blocks)]

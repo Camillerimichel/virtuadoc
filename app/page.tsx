@@ -74,6 +74,7 @@ type ConfigKind = "item" | "template" | "global";
 type RequiredElement = {
   name: string;
   weight: number;
+  pages?: string;
   strategy?: "keyword" | "relative_anchor";
   anchor?: {
     keyword?: string;
@@ -1370,7 +1371,7 @@ export default function Home() {
                           ...guidedItemConfig,
                           required_elements: [
                             ...guidedItemConfig.required_elements,
-                            { name: "nouvel_element", weight: 1, strategy: "keyword" },
+                            { name: "nouvel_element", weight: 1, pages: "", strategy: "keyword" },
                           ],
                         })
                       }
@@ -1395,6 +1396,22 @@ export default function Home() {
                               placeholder="ex: president_nom"
                               className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
                             />
+                          </label>
+                          <label className="text-xs text-slate-300">
+                            Pages
+                            <input
+                              value={element.pages || ""}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.required_elements];
+                                next[idx] = { ...next[idx], pages: e.target.value };
+                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                              }}
+                              placeholder="3 ou 3-4"
+                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            />
+                            <span className="mt-1 block text-[11px] text-slate-500">
+                              Optionnel. Ex: `3`, `3-4`, `3,5`.
+                            </span>
                           </label>
                           <label className="text-xs text-slate-300">
                             Stratégie

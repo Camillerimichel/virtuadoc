@@ -19,6 +19,11 @@ class ElementDetector:
         ocr_texts: list[str],
     ) -> list[DetectionResult]:
         findings: list[DetectionResult] = []
+        known_field_names = {
+            " ".join(str(element.get("name", "")).lower().split())
+            for element in required_elements
+            if str(element.get("name", "")).strip()
+        }
         page_text = defaultdict(str)
         zones_by_page: dict[int, list[LayoutZone]] = defaultdict(list)
 
@@ -32,11 +37,27 @@ class ElementDetector:
         for element in required_elements:
             name = element["name"]
             strategy = str(element.get("strategy", "keyword"))
+            allowed_pages = self._parse_allowed_pages(element.get("pages"))
             if strategy == "relative_anchor":
-                result = self._detect_relative_anchor(name, element, zones_by_page)
+                result = self._detect_relative_anchor(
+                    name,
+                    element,
+                    zones_by_page,
+                    known_field_names,
+                    allowed_pages,
+                )
             else:
                 aliases = self._aliases_for(name)
-                result = self._detect_one(name, aliases, page_text, zones_by_page)
+                match_mode = str(element.get("match_mode", "contains"))
+                result = self._detect_one(
+                    name,
+                    aliases,
+                    match_mode,
+                    page_text,
+                    zones_by_page,
+                    known_field_names,
+                    allowed_pages,
+                )
             if result:
                 findings.append(result)
 
@@ -50,20 +71,27 @@ class ElementDetector:
         self,
         name: str,
         aliases: list[str],
+        match_mode: str,
         page_text: dict[int, str],
         zones_by_page: dict[int, list[LayoutZone]],
+        known_field_names: set[str],
+        allowed_pages: set[int] | None,
     ) -> DetectionResult | None:
         for page, zones in zones_by_page.items():
+            if allowed_pages is not None and page not in allowed_pages:
+                continue
+            sorted_zones = sorted(zones, key=lambda zone: (-zone.y1, zone.x0))
             best_result: DetectionResult | None = None
             best_score = -1
-            for zone in zones:
-                lowered_zone = zone.text.lower()
-                if any(alias.lower() in lowered_zone for alias in aliases):
-                    right_zone = self._find_right_candidate(zone, zones)
-                    below_zone = self._find_below_candidate(zone, zones)
-                    inline_value = self._extract_inline_value(zone.text, aliases)
+            for zone in sorted_zones:
+                if any(self._match_mode(zone.text, alias, match_mode) for alias in aliases):
+                    right_zone = self._find_right_candidate(zone, sorted_zones)
+                    below_zone = self._find_below_candidate(zone, sorted_zones)
+                    below_right_zone = self._find_right_candidate(below_zone, sorted_zones) if below_zone else None
+                    inline_value = self._extract_inline_value(zone.text, aliases, known_field_names)
                     right_text = self._clean_preview_text(right_zone.text) if right_zone else None
                     below_text = self._clean_preview_text(below_zone.text) if below_zone else None
+                    below_right_text = self._clean_preview_text(below_right_zone.text) if below_right_zone else None
 
                     value = None
                     value_pos = None
@@ -71,12 +99,17 @@ class ElementDetector:
                         value = inline_value
                         value_pos = "right"
                     elif right_text:
-                        normalized = self._normalize_candidate_text(right_text, aliases)
+                        normalized = self._normalize_candidate_text(right_text, aliases, known_field_names)
                         if normalized:
                             value = normalized
                             value_pos = "right"
+                    elif below_right_text:
+                        normalized = self._normalize_candidate_text(below_right_text, aliases, known_field_names)
+                        if normalized:
+                            value = normalized
+                            value_pos = "below_right"
                     elif below_text:
-                        normalized = self._normalize_candidate_text(below_text, aliases)
+                        normalized = self._normalize_candidate_text(below_text, aliases, known_field_names)
                         if normalized:
                             value = normalized
                             value_pos = "below"
@@ -90,6 +123,8 @@ class ElementDetector:
                         meta["right_text"] = right_text
                     if below_text:
                         meta["below_text"] = below_text
+                    if below_right_text:
+                        meta["below_right_text"] = below_right_text
                     candidate_score = 1
                     if value:
                         candidate_score = 3
@@ -103,6 +138,8 @@ class ElementDetector:
                 return best_result
 
         for page, content in page_text.items():
+            if allowed_pages is not None and page not in allowed_pages:
+                continue
             lowered = content.lower()
             fuzzy = max((fuzz.partial_ratio(alias.lower(), lowered) for alias in aliases), default=0)
             if fuzzy >= 90:
@@ -124,6 +161,8 @@ class ElementDetector:
         name: str,
         element: dict,
         zones_by_page: dict[int, list[LayoutZone]],
+        known_field_names: set[str],
+        allowed_pages: set[int] | None,
     ) -> DetectionResult | None:
         anchor = element.get("anchor", {}) if isinstance(element.get("anchor"), dict) else {}
         move = element.get("move", {}) if isinstance(element.get("move"), dict) else {}
@@ -140,6 +179,8 @@ class ElementDetector:
         mode = str(target.get("mode", "contains"))
 
         for page, zones in zones_by_page.items():
+            if allowed_pages is not None and page not in allowed_pages:
+                continue
             lines = sorted(zones, key=lambda z: (-z.y1, z.x0))
             anchor_hits = [line for line in lines if self._match_mode(line.text, anchor_keyword, "contains")]
             if len(anchor_hits) < occurrence:
@@ -160,7 +201,12 @@ class ElementDetector:
                     target_below_zone = self._find_below_candidate(line, lines)
                     target_right_text = self._clean_preview_text(target_right_zone.text) if target_right_zone else None
                     target_below_text = self._clean_preview_text(target_below_zone.text) if target_below_zone else None
-                    extracted_value = target_right_text or target_below_text or line.text
+                    extracted_value = (
+                        self._normalize_candidate_text(target_right_text or "", [name], known_field_names)
+                        or self._normalize_candidate_text(target_below_text or "", [name], known_field_names)
+                        or self._normalize_candidate_text(line.text, [name], known_field_names)
+                        or line.text
+                    )
 
                     return DetectionResult(
                         name=name,
@@ -278,30 +324,38 @@ class ElementDetector:
                     )
         return visual_results
 
-    def _extract_inline_value(self, text: str, aliases: list[str]) -> str | None:
+    def _extract_inline_value(self, text: str, aliases: list[str], known_field_names: set[str]) -> str | None:
         lowered = text.lower()
         for alias in aliases:
             marker = f"{alias.lower()}:"
             idx = lowered.find(marker)
             if idx >= 0:
                 value = text[idx + len(marker) :].strip(" .:-\t")
-                normalized = self._normalize_candidate_text(value, aliases)
+                normalized = self._normalize_candidate_text(value, aliases, known_field_names)
                 if normalized:
                     return normalized
         if ":" in text:
             right = text.split(":", 1)[1].strip(" .:-\t")
-            normalized = self._normalize_candidate_text(right, aliases)
+            normalized = self._normalize_candidate_text(right, aliases, known_field_names)
             if normalized:
                 return normalized
         return None
 
-    def _normalize_candidate_text(self, text: str, aliases: list[str]) -> str | None:
+    def _normalize_candidate_text(self, text: str, aliases: list[str], known_field_names: set[str]) -> str | None:
         cleaned = " ".join(text.strip().split())
         cleaned = cleaned.strip(" .:-\t")
         if len(cleaned) < 2:
             return None
+        if self._is_placeholder_like_text(cleaned):
+            return None
+        if re.fullmatch(r"\([^)]*\)", cleaned):
+            return None
+        if self._is_checkbox_choice_text(cleaned):
+            return None
 
         lowered = cleaned.lower()
+        if " ".join(lowered.split()) in known_field_names:
+            return None
         if any(lowered == alias.lower() for alias in aliases):
             return None
         if any(fuzz.ratio(lowered, alias.lower()) >= 90 for alias in aliases):
@@ -312,6 +366,12 @@ class ElementDetector:
         cleaned = " ".join(text.strip().split())
         cleaned = cleaned.strip(" .:-\t")
         if len(cleaned) < 1:
+            return None
+        if self._is_placeholder_like_text(cleaned):
+            return None
+        if re.fullmatch(r"\([^)]*\)", cleaned):
+            return None
+        if self._is_checkbox_choice_text(cleaned):
             return None
         return cleaned
 
@@ -327,6 +387,8 @@ class ElementDetector:
             if zone.x0 <= label_zone.x1:
                 continue
             if abs(zone.y1 - zone.y0) > max_candidate_height:
+                continue
+            if self._clean_preview_text(zone.text) is None:
                 continue
 
             # For "right", keep only zones that share substantially the same row.
@@ -353,6 +415,8 @@ class ElementDetector:
         for zone in page_zones:
             if zone is label_zone:
                 continue
+            if self._clean_preview_text(zone.text) is None:
+                continue
 
             overlap = min(label_zone.x1, zone.x1) - max(label_zone.x0, zone.x0)
             if overlap < min_overlap:
@@ -371,3 +435,44 @@ class ElementDetector:
             return None
         candidates.sort(key=lambda c: (c[0], c[1]))
         return candidates[0][2]
+
+    def _is_placeholder_like_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text or "")
+        if not compact:
+            return True
+        if re.search(r"[A-Za-z0-9À-ÿ]", compact):
+            return False
+        return re.fullmatch(r"[_\-.=~/\\|:]+", compact) is not None
+
+    def _is_checkbox_choice_text(self, text: str) -> bool:
+        compact = " ".join((text or "").split())
+        if "" not in compact and "☐" not in compact and "☑" not in compact:
+            return False
+        return True
+
+    def _parse_allowed_pages(self, value: object) -> set[int] | None:
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+
+        pages: set[int] = set()
+        for chunk in re.split(r"[;, ]+", raw):
+            part = chunk.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start_raw, end_raw = part.split("-", 1)
+                start = self._safe_int(start_raw, -1)
+                end = self._safe_int(end_raw, -1)
+                if start <= 0 or end <= 0:
+                    continue
+                low, high = sorted((start, end))
+                pages.update(range(low, high + 1))
+                continue
+            page = self._safe_int(part, -1)
+            if page > 0:
+                pages.add(page)
+
+        return pages or None

@@ -1,0 +1,115 @@
+item: Assurance vie luxembourg Vitis
+language: fr
+template: contract
+threshold: 0.7
+required_elements:
+  - name: Montant de la prime initiale
+    weight: 1
+    pages: "3"
+    strategy: relative_anchor
+    anchor:
+      keyword: PROPOSITION DE CONTRAT
+      occurrence: 1
+    move:
+      lines_below: 1
+      tolerance: 1
+    target:
+      keyword: Montant de la prime initiale
+      mode: contains
+  - name: Nom
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Prénom
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Date de naissance
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Lieu de naissance
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Pays de naissance
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Rue
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Numéro
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Ville
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Code postal
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Pays
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Numéro d’identification
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Pays de résidence fiscale
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+  - name: Téléphone/portable
+    weight: 1
+    pages: "3"
+    strategy: keyword
+    match_mode: exact
+variants:
+  - Assurance vie luxembourg Vitis_v1
+variant_signatures:
+  - name: Assurance vie luxembourg Vitis_v1
+    page_count: 16
+    dominant_keywords:
+      - souscripteur
+      - votre
+      - vous
+      - contrat
+      - que
+      - vitislife
+      - com
+      - risque
+      - luxembourg
+      - sri
+      - frais
+      - compte
+    table_presence: true
+    title_patterns:
+      - "Auprès de la société :"
+      - "2 I 15"
+      - PROPOSITION DE CONTRAT
+      - "1. Les parties prenantes à votre contrat"
+      - "Joindre pour chaque Souscripteur :"
+audit:
+  sample_count: 4
+  page_distribution:
+    "16": 4
+  document_type: pdf
+  excel_header_axis: null
+  excel_pairs_preview: []
