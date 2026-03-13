@@ -136,6 +136,7 @@ class AnalyzePipeline:
         return {
             "document_id": document_id,
             "item": item_name,
+            "item_auto_detected": False,
             "score": completeness_score,
             "valid": valid,
             "variant_detected": variant_name,
@@ -179,6 +180,58 @@ class AnalyzePipeline:
                 "title_patterns": signature.title_patterns,
             },
         }
+
+    def run_with_item_detection(
+        self,
+        base64_document: str,
+        ocr_mode: str = "auto",
+        document_type: str = "pdf",
+        excel_header_axis: str = "first_row",
+    ) -> dict:
+        item_names = self.item_loader.list_items()
+        if not item_names:
+            raise FileNotFoundError("No item configuration found")
+
+        best_result: dict | None = None
+        best_key: tuple[float, float, float, float] | None = None
+        last_error: Exception | None = None
+
+        for item_name in item_names:
+            try:
+                result = self.run(
+                    item_name=item_name,
+                    base64_document=base64_document,
+                    ocr_mode=ocr_mode,
+                    document_type=document_type,
+                    excel_header_axis=excel_header_axis,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                last_error = exc
+                continue
+
+            candidate_key = self._candidate_key(result)
+            if best_key is None or candidate_key > best_key:
+                best_key = candidate_key
+                best_result = result
+
+        if best_result is None:
+            if last_error is not None:
+                raise last_error
+            raise FileNotFoundError("No item configuration could analyze this document")
+
+        best_result["item_auto_detected"] = True
+        return best_result
+
+    def _candidate_key(self, result: dict) -> tuple[float, float, float, float]:
+        total_weight = float(result.get("total_weight_sum", 0.0) or 0.0)
+        matched_weight = float(result.get("matched_weight_sum", 0.0) or 0.0)
+        weight_ratio = matched_weight / total_weight if total_weight > 0 else 0.0
+        return (
+            1.0 if result.get("valid") else 0.0,
+            float(result.get("score", 0.0) or 0.0),
+            weight_ratio,
+            float(result.get("variant_score", 0.0) or 0.0),
+        )
 
     def _zones_from_ocr_blocks(self, ocr_blocks: list[OcrBlock]) -> list[LayoutZone]:
         zones: list[LayoutZone] = []

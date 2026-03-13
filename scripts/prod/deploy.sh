@@ -56,6 +56,10 @@ if [[ "$ALLOW_DIRTY" != "true" && -n "$(git status --porcelain)" ]]; then
   fail "Working tree non propre. Commit/stash requis avant déploiement."
 fi
 
+log "Préparation du stockage persistant des configurations"
+mkdir -p "$PERSISTENT_DOCUMENT_ENGINE_CONFIG_DIR"
+cp -a --update=none "$ROOT_DIR/document_engine/config/." "$PERSISTENT_DOCUMENT_ENGINE_CONFIG_DIR/"
+
 log "Build images production"
 BUILD_ARGS=()
 if [[ "$PULL_BASE" == "true" ]]; then

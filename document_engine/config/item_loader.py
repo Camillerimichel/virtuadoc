@@ -9,6 +9,10 @@ class ItemLoader:
     def __init__(self, config_dir: Path) -> None:
         self.config_dir = config_dir
 
+    def list_items(self) -> list[str]:
+        items_dir = self.config_dir / "items"
+        return sorted(path.stem for path in items_dir.glob("*.yml"))
+
     def load_item(self, item_name: str) -> dict:
         item_path = self.config_dir / "items" / f"{item_name}.yml"
         if not item_path.exists():

@@ -31,6 +31,7 @@ class ElementFound(BaseModel):
 class AnalyzeResponse(BaseModel):
     document_id: str
     item: str
+    item_auto_detected: bool = False
     score: float
     valid: bool
     variant_detected: str | None
@@ -50,6 +51,32 @@ class AnalyzeResponse(BaseModel):
     processing_time_ms: int
     document_type: Literal["pdf", "excel"] = "pdf"
     excel_pairs_preview: list[str] = []
+
+
+class AnalyzeBatchRequest(BaseModel):
+    documents: list[str] = Field(min_length=1)
+    filenames: list[str] = []
+    document_types: list[Literal["pdf", "excel"]] = Field(min_length=1)
+    item: str | None = None
+    detect_item: bool = False
+    ocr_mode: Literal["auto", "native", "ocr"] = "auto"
+    excel_header_axis: Literal["first_row", "first_column"] = "first_row"
+
+
+class AnalyzeBatchResult(BaseModel):
+    filename: str | None = None
+    document_type: Literal["pdf", "excel"]
+    item_requested: str | None = None
+    success: bool
+    error: str | None = None
+    analysis: AnalyzeResponse | None = None
+
+
+class AnalyzeBatchResponse(BaseModel):
+    results: list[AnalyzeBatchResult]
+    total_count: int
+    success_count: int
+    error_count: int
 
 
 class BuildItemRequest(BaseModel):

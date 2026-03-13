@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILES=(-f "$ROOT_DIR/docker-compose.prod.yml")
+PERSISTENT_DOCUMENT_ENGINE_CONFIG_DIR="/var/lib/virtuadoc/document_engine_config"
 
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"

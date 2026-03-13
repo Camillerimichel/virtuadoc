@@ -28,6 +28,7 @@ type ElementFound = {
 type AnalyzeResponse = {
   document_id: string;
   item: string;
+  item_auto_detected: boolean;
   score: number;
   valid: boolean;
   variant_detected: string | null;
@@ -47,6 +48,22 @@ type AnalyzeResponse = {
   processing_time_ms: number;
   document_type: "pdf" | "excel";
   excel_pairs_preview: string[];
+};
+
+type AnalyzeBatchResult = {
+  filename?: string | null;
+  document_type: "pdf" | "excel";
+  item_requested?: string | null;
+  success: boolean;
+  error?: string | null;
+  analysis?: AnalyzeResponse | null;
+};
+
+type AnalyzeBatchResponse = {
+  results: AnalyzeBatchResult[];
+  total_count: number;
+  success_count: number;
+  error_count: number;
 };
 
 type DocumentType = "pdf" | "excel";
@@ -154,6 +171,18 @@ function emptyItemConfig(itemName: string): ItemConfig {
   };
 }
 
+function triggerDownload(content: BlobPart, filename: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export default function Home() {
   const [tab, setTab] = useState<Tab>("analyze");
 
@@ -164,10 +193,18 @@ export default function Home() {
   const [analyzeOcrMode, setAnalyzeOcrMode] = useState<"auto" | "native" | "ocr">("auto");
   const [analyzeExcelHeaderAxis, setAnalyzeExcelHeaderAxis] =
     useState<"first_row" | "first_column">("first_row");
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
+  const [analyzeProgress, setAnalyzeProgress] = useState<{
+    current: number;
+    total: number;
+    phase: "encoding" | "processing";
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
+  const [batchResult, setBatchResult] = useState<AnalyzeBatchResponse | null>(null);
+  const [selectedBatchIndex, setSelectedBatchIndex] = useState(0);
+  const [analyzeDetectItem, setAnalyzeDetectItem] = useState(true);
   const [analyzeTrace, setAnalyzeTrace] = useState<string[]>([]);
   const [showAnalyzeTrace, setShowAnalyzeTrace] = useState(false);
   const [showAnalyzeDetectedFields, setShowAnalyzeDetectedFields] = useState(false);
@@ -184,6 +221,7 @@ export default function Home() {
   const [guidedItemConfig, setGuidedItemConfig] = useState<ItemConfig | null>(null);
   const [guidedBusy, setGuidedBusy] = useState(false);
   const [guidedMessage, setGuidedMessage] = useState<string | null>(null);
+  const [guidedMessageTone, setGuidedMessageTone] = useState<"success" | "error" | "info">("info");
   const [showConfigHelp, setShowConfigHelp] = useState(false);
   const [duplicateItemName, setDuplicateItemName] = useState("");
 
@@ -198,11 +236,14 @@ export default function Home() {
   const [showTrainingResult, setShowTrainingResult] = useState(false);
   const [showTrainingDebug, setShowTrainingDebug] = useState(false);
   const trainingInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedBatchEntry =
+    batchResult && batchResult.results[selectedBatchIndex] ? batchResult.results[selectedBatchIndex] : null;
+  const selectedAnalysis = selectedBatchEntry?.analysis || result;
 
   const scorePercent = useMemo(() => {
-    if (!result) return 0;
-    return Math.round(result.score * 100);
-  }, [result]);
+    if (!selectedAnalysis) return 0;
+    return Math.round(selectedAnalysis.score * 100);
+  }, [selectedAnalysis]);
 
   const refreshLists = useCallback(async () => {
     const itemResp = await fetchJson<{ items: string[] }>(
@@ -242,25 +283,30 @@ export default function Home() {
   }, [configKind, configName, items, templates]);
 
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const nextFile = event.target.files?.[0] ?? null;
-    const nextType = nextFile ? detectDocumentType(nextFile) : null;
-    if (nextFile && !nextType) {
-      setFile(null);
+    const nextFiles = Array.from(event.target.files || []);
+    const unsupported = nextFiles.find((nextFile) => detectDocumentType(nextFile) === null);
+    if (unsupported) {
+      setFiles([]);
+      setAnalyzeProgress(null);
       setError("Formats supportés: PDF, XLSX, XLSM.");
       setResult(null);
+      setBatchResult(null);
       setAnalyzeTrace([]);
       return;
     }
-    setFile(nextFile);
-    if (nextType === "excel") {
+    setFiles(nextFiles);
+    if (nextFiles.length > 0 && nextFiles.every((nextFile) => detectDocumentType(nextFile) === "excel")) {
       setAnalyzeOcrMode("native");
     }
     setResult(null);
+    setBatchResult(null);
+    setAnalyzeProgress(null);
     setError(null);
     setAnalyzeTrace([]);
     setShowAnalyzeTrace(false);
     setShowAnalyzeDetectedFields(false);
     setShowAnalyzeDebug(false);
+    setSelectedBatchIndex(0);
   };
 
   const pushAnalyzeTrace = (message: string) => {
@@ -272,66 +318,98 @@ export default function Home() {
     event.preventDefault();
     setError(null);
     setResult(null);
+    setBatchResult(null);
+    setAnalyzeProgress(null);
     setAnalyzeTrace([]);
     setShowAnalyzeTrace(true);
     setShowAnalyzeDetectedFields(false);
     setShowAnalyzeDebug(false);
     pushAnalyzeTrace("Début de l'analyse");
 
-    if (!file) {
+    if (files.length === 0) {
       pushAnalyzeTrace("Validation échouée: aucun fichier sélectionné");
-      setError("Sélectionne un fichier (PDF ou Excel) avant de lancer l'analyse.");
+      setError("Sélectionne au moins un fichier (PDF ou Excel) avant de lancer l'analyse.");
       setShowAnalyzeTrace(false);
       return;
     }
 
-    const documentType = detectDocumentType(file);
-    if (!documentType) {
-      pushAnalyzeTrace(`Validation échouée: type invalide (${file.type || "inconnu"})`);
-      setError("Le fichier doit être un PDF, XLSX ou XLSM.");
+    const documentTypes = files.map((entry) => detectDocumentType(entry));
+    if (documentTypes.some((entry) => !entry)) {
+      pushAnalyzeTrace("Validation échouée: au moins un fichier est dans un format invalide");
+      setError("Tous les fichiers doivent être en PDF, XLSX ou XLSM.");
       setShowAnalyzeTrace(false);
       return;
     }
 
-    if (documentType === "excel" && analyzeOcrMode === "ocr") {
+    if (documentTypes.every((entry) => entry === "excel") && analyzeOcrMode === "ocr") {
       setAnalyzeOcrMode("auto");
     }
 
-    pushAnalyzeTrace(`Validation OK: ${file.name} (${documentType})`);
+    pushAnalyzeTrace(`Validation OK: ${files.length} fichier(s)`);
     setLoading(true);
+    setAnalyzeProgress({ current: 0, total: files.length, phase: "encoding" });
     try {
-      pushAnalyzeTrace("Encodage Base64 du fichier");
-      const base64 = await fileToBase64(file);
-      pushAnalyzeTrace(`Encodage terminé (${Math.round(base64.length / 1024)} KB Base64)`);
-      const modeToSend = documentType === "excel" ? "native" : analyzeOcrMode;
+      pushAnalyzeTrace("Encodage Base64 des fichiers");
+      const encodedFiles: string[] = [];
+      for (let idx = 0; idx < files.length; idx += 1) {
+        const currentType = documentTypes[idx] as DocumentType;
+        setAnalyzeProgress({ current: idx + 1, total: files.length, phase: "encoding" });
+        pushAnalyzeTrace(`Encodage ${idx + 1}/${files.length}: ${files[idx].name} (${currentType})`);
+        encodedFiles.push(await fileToBase64(files[idx]));
+      }
+      const modeToSend = analyzeOcrMode;
       pushAnalyzeTrace(
-        `Envoi au backend (item: ${item}, type: ${documentType}, mode: ${modeToSend}${documentType === "excel" ? `, intitulés=${analyzeExcelHeaderAxis}` : ""})`,
+        `Envoi au backend (${files.length} fichier(s), mode: ${modeToSend}, item=${analyzeDetectItem ? "auto-détection" : item})`,
       );
-      const body = await fetchJson<AnalyzeResponse>(
-        "/api/document-engine/analyze",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            item,
-            documents: [base64],
-            ocr_mode: modeToSend,
-            document_type: documentType,
-            excel_header_axis: analyzeExcelHeaderAxis,
-          }),
-        },
-      );
+      const batchEntries: AnalyzeBatchResult[] = [];
+      let successCount = 0;
+      for (let idx = 0; idx < encodedFiles.length; idx += 1) {
+        const currentFile = files[idx];
+        const currentType = documentTypes[idx] as DocumentType;
+        setAnalyzeProgress({ current: idx, total: encodedFiles.length, phase: "processing" });
+        pushAnalyzeTrace(`Traitement backend ${idx + 1}/${encodedFiles.length}: ${currentFile.name}`);
+        const partialBody = await fetchJson<AnalyzeBatchResponse>(
+          "/api/document-engine/analyze-batch",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              item: analyzeDetectItem ? null : item,
+              detect_item: analyzeDetectItem,
+              filenames: [currentFile.name],
+              documents: [encodedFiles[idx]],
+              document_types: [currentType],
+              ocr_mode: modeToSend,
+              excel_header_axis: analyzeExcelHeaderAxis,
+            }),
+          },
+        );
+        const partialResult = partialBody.results[0];
+        batchEntries.push(partialResult);
+        if (partialResult?.success) {
+          successCount += 1;
+        }
+        setAnalyzeProgress({ current: idx + 1, total: encodedFiles.length, phase: "processing" });
+        pushAnalyzeTrace(
+          partialResult?.success
+            ? `Terminé ${idx + 1}/${encodedFiles.length}: ${currentFile.name}`
+            : `Échec ${idx + 1}/${encodedFiles.length}: ${currentFile.name}`,
+        );
+      }
+      const body: AnalyzeBatchResponse = {
+        results: batchEntries,
+        total_count: batchEntries.length,
+        success_count: successCount,
+        error_count: batchEntries.length - successCount,
+      };
       pushAnalyzeTrace("Réponse backend reçue");
       pushAnalyzeTrace(
-        `Résultat: valid=${body.valid ? "oui" : "non"}, score=${Math.round(body.score * 100)}%, OCR=${body.ocr_used ? "oui" : "non"} (demandé=${body.ocr_mode_requested}, appliqué=${body.ocr_mode_applied}, tenté=${body.ocr_attempted ? "oui" : "non"}, blocs=${body.ocr_blocks_count})`,
+        `Synthèse: ${body.success_count} succès, ${body.error_count} erreur(s), ${body.total_count} fichier(s) traités`,
       );
-      if (body.ocr_error) {
-        pushAnalyzeTrace(`Erreur OCR: ${body.ocr_error}`);
-      }
-      pushAnalyzeTrace(
-        `Champs détectés: ${body.elements_found.length}, manquants: ${body.missing_elements.length}`,
-      );
-      setResult(body);
+      const firstSuccessIndex = body.results.findIndex((entry) => entry.success && entry.analysis);
+      setSelectedBatchIndex(firstSuccessIndex >= 0 ? firstSuccessIndex : 0);
+      setBatchResult(body);
+      setResult(firstSuccessIndex >= 0 ? body.results[firstSuccessIndex].analysis || null : null);
     } catch (err) {
       pushAnalyzeTrace(
         `Erreur attrapée: ${err instanceof Error ? err.message : "Erreur inconnue"}`,
@@ -339,6 +417,7 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
     } finally {
       pushAnalyzeTrace("Fin de l'analyse");
+      setAnalyzeProgress(null);
       setShowAnalyzeTrace(false);
       setLoading(false);
     }
@@ -407,6 +486,7 @@ export default function Home() {
   const loadGuidedItem = async (targetItem: string = guidedItemName) => {
     setGuidedBusy(true);
     setGuidedMessage(null);
+    setGuidedMessageTone("info");
     try {
       const body = await fetchJson<{ config: ItemConfig }>(
         `/api/document-engine/config/items/${targetItem}`,
@@ -433,6 +513,7 @@ export default function Home() {
     if (!guidedItemConfig) return;
     setGuidedBusy(true);
     setGuidedMessage(null);
+    setGuidedMessageTone("info");
     try {
       const payload: ItemConfig = {
         ...guidedItemConfig,
@@ -446,8 +527,10 @@ export default function Home() {
       });
       await refreshLists();
       setGuidedMessage("Item sauvegardé.");
+      setGuidedMessageTone("success");
     } catch (err) {
       setGuidedMessage(err instanceof Error ? err.message : "Erreur de sauvegarde");
+      setGuidedMessageTone("error");
     } finally {
       setGuidedBusy(false);
     }
@@ -458,11 +541,13 @@ export default function Home() {
     const nextItemName = duplicateItemName.trim();
     if (!nextItemName) {
       setGuidedMessage("Renseigne un nom d'item pour la duplication.");
+      setGuidedMessageTone("error");
       return;
     }
 
     setGuidedBusy(true);
     setGuidedMessage(null);
+    setGuidedMessageTone("info");
     try {
       const payload: ItemConfig = {
         ...guidedItemConfig,
@@ -479,8 +564,10 @@ export default function Home() {
       setGuidedItemConfig(payload);
       setDuplicateItemName("");
       setGuidedMessage(`Item dupliqué vers '${nextItemName}'.`);
+      setGuidedMessageTone("success");
     } catch (err) {
       setGuidedMessage(err instanceof Error ? err.message : "Erreur de duplication");
+      setGuidedMessageTone("error");
     } finally {
       setGuidedBusy(false);
     }
@@ -494,7 +581,9 @@ export default function Home() {
 
     setGuidedBusy(true);
     setGuidedMessage(null);
+    setGuidedMessageTone("info");
     try {
+      const deletedItemName = guidedItemName;
       await fetchJson(`/api/document-engine/config/items/${guidedItemName}`, {
         method: "DELETE",
       });
@@ -507,9 +596,11 @@ export default function Home() {
       } else {
         setGuidedItemConfig(emptyItemConfig(nextItemName));
       }
-      setGuidedMessage(`Item '${guidedItemName}' supprimé.`);
+      setGuidedMessage(`Item '${deletedItemName}' supprimé.`);
+      setGuidedMessageTone("success");
     } catch (err) {
       setGuidedMessage(err instanceof Error ? err.message : "Erreur de suppression");
+      setGuidedMessageTone("error");
     } finally {
       setGuidedBusy(false);
     }
@@ -625,6 +716,57 @@ export default function Home() {
 
   const optionList = configKind === "template" ? templates : items;
 
+  const exportAnalyzeSummaryCsv = () => {
+    if (!batchResult) return;
+    const rows = [
+      ["Fichier", "Type", "Item", "Auto item", "Valide", "Score", "OCR", "Temps ms", "Champs manquants", "Erreur"],
+      ...batchResult.results.map((entry) => {
+        const analysis = entry.analysis;
+        return [
+          entry.filename || "",
+          entry.document_type,
+          analysis?.item || entry.item_requested || "",
+          analysis?.item_auto_detected ? "oui" : "non",
+          analysis ? (analysis.valid ? "oui" : "non") : "non",
+          analysis ? `${Math.round(analysis.score * 100)}%` : "",
+          analysis ? (analysis.ocr_used ? "oui" : "non") : "",
+          analysis ? String(analysis.processing_time_ms) : "",
+          analysis?.missing_elements.join(" | ") || "",
+          entry.error || "",
+        ];
+      }),
+    ];
+    const csv = rows
+      .map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(","))
+      .join("\n");
+    triggerDownload(csv, "analyse-resume.csv", "text/csv;charset=utf-8");
+  };
+
+  const exportAnalyzeSummaryExcel = () => {
+    if (!batchResult) return;
+    const header = ["Fichier", "Type", "Item", "Auto item", "Valide", "Score", "OCR", "Temps ms", "Champs manquants", "Erreur"];
+    const rows = batchResult.results
+      .map((entry) => {
+        const analysis = entry.analysis;
+        const values = [
+          entry.filename || "",
+          entry.document_type,
+          analysis?.item || entry.item_requested || "",
+          analysis?.item_auto_detected ? "oui" : "non",
+          analysis ? (analysis.valid ? "oui" : "non") : "non",
+          analysis ? `${Math.round(analysis.score * 100)}%` : "",
+          analysis ? (analysis.ocr_used ? "oui" : "non") : "",
+          analysis ? String(analysis.processing_time_ms) : "",
+          analysis?.missing_elements.join(" | ") || "",
+          entry.error || "",
+        ];
+        return `<tr>${values.map((value) => `<td>${String(value)}</td>`).join("")}</tr>`;
+      })
+      .join("");
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><table border="1"><thead><tr>${header.map((value) => `<th>${value}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></body></html>`;
+    triggerDownload(html, "analyse-resume.xls", "application/vnd.ms-excel;charset=utf-8");
+  };
+
   return (
     <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100">
       <section className="mx-auto w-full max-w-5xl">
@@ -664,31 +806,55 @@ export default function Home() {
             >
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-200">
-                  Item
+                  Détection de l&apos;item
                 </label>
-                <select
-                  value={item}
-                  onChange={(e) => setItem(e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
-                >
-                  {items.map((entry) => (
-                    <option key={entry} value={entry}>
-                      {entry}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAnalyzeDetectItem(true)}
+                    className={`rounded-lg px-3 py-2 text-sm font-semibold ${
+                      analyzeDetectItem ? "bg-emerald-400 text-slate-950" : "bg-slate-800 text-slate-200"
+                    }`}
+                  >
+                    Auto-détection
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAnalyzeDetectItem(false)}
+                    className={`rounded-lg px-3 py-2 text-sm font-semibold ${
+                      !analyzeDetectItem ? "bg-emerald-400 text-slate-950" : "bg-slate-800 text-slate-200"
+                    }`}
+                  >
+                    Item manuel
+                  </button>
+                </div>
+                {!analyzeDetectItem ? (
+                  <select
+                    value={item}
+                    onChange={(e) => setItem(e.target.value)}
+                    className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                  >
+                    {items.map((entry) => (
+                      <option key={entry} value={entry}>
+                        {entry}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
               </div>
 
               <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-200">
-                  Document (PDF ou Excel natif)
+                <label className="mb-2 block text-sm font-medium text-slate-200">
+                  Documents (PDF ou Excel natif)
                 </label>
                 <input
                   type="file"
+                  multiple
                   accept=".pdf,.xlsx,.xlsm,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
                   onChange={onFileChange}
                   className="block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-950"
                 />
+                <p className="mt-2 text-xs text-slate-400">{files.length} fichier(s) sélectionné(s)</p>
               </div>
 
               <div>
@@ -721,7 +887,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setAnalyzeOcrMode("ocr")}
-                    disabled={file ? detectDocumentType(file) === "excel" : false}
+                    disabled={files.length > 0 && files.every((entry) => detectDocumentType(entry) === "excel")}
                     className={`rounded-lg px-3 py-2 text-sm font-semibold ${
                       analyzeOcrMode === "ocr"
                         ? "bg-emerald-400 text-slate-950"
@@ -736,7 +902,7 @@ export default function Home() {
                 </p>
               </div>
 
-              {file && detectDocumentType(file) === "excel" ? (
+              {files.length > 0 && files.every((entry) => detectDocumentType(entry) === "excel") ? (
                 <div>
                   <label className="mb-2 block text-sm font-medium text-slate-200">
                     Excel: position des intitulés
@@ -764,6 +930,30 @@ export default function Home() {
                 {loading ? "Analyse en cours..." : "Lancer l'analyse"}
               </button>
 
+              {loading && analyzeProgress ? (
+                <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+                  <div className="flex items-center justify-between gap-3 text-sm text-slate-200">
+                    <p>
+                      Documents {analyzeProgress.current} / {analyzeProgress.total}
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      {analyzeProgress.phase === "encoding" ? "Préparation et envoi" : "Traitement backend"}
+                    </p>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className="h-full rounded-full bg-emerald-400 transition-all duration-300"
+                      style={{
+                        width: `${Math.max(
+                          8,
+                          Math.round((analyzeProgress.current / analyzeProgress.total) * 100),
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
               {error ? <p className="text-sm text-rose-300">{error}</p> : null}
             </form>
 
@@ -787,43 +977,139 @@ export default function Home() {
               </div>
             ) : null}
 
-            {result ? (
+            {batchResult ? (
               <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-sm text-slate-300">
+                    <p>
+                      Fichiers traités: <b>{batchResult.total_count}</b>
+                    </p>
+                    <p>
+                      Succès: <b>{batchResult.success_count}</b> | Erreurs: <b>{batchResult.error_count}</b>
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={exportAnalyzeSummaryCsv}
+                      className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold text-slate-100"
+                    >
+                      Export CSV
+                    </button>
+                    <button
+                      type="button"
+                      onClick={exportAnalyzeSummaryExcel}
+                      className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold text-slate-100"
+                    >
+                      Export Excel
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 overflow-x-auto rounded-lg border border-slate-800">
+                  <table className="min-w-full text-left text-sm text-slate-200">
+                    <thead className="bg-slate-950/80 text-xs uppercase tracking-wide text-slate-400">
+                      <tr>
+                        <th className="px-3 py-2">Fichier</th>
+                        <th className="px-3 py-2">Type</th>
+                        <th className="px-3 py-2">Item</th>
+                        <th className="px-3 py-2">Valide</th>
+                        <th className="px-3 py-2">Score</th>
+                        <th className="px-3 py-2">OCR</th>
+                        <th className="px-3 py-2">Temps</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {batchResult.results.map((entry, idx) => (
+                        <tr
+                          key={`${entry.filename || "document"}-${idx}`}
+                          onClick={() => {
+                            setSelectedBatchIndex(idx);
+                            setResult(entry.analysis || null);
+                          }}
+                          className={`cursor-pointer border-t border-slate-800 ${
+                            selectedBatchIndex === idx ? "bg-emerald-400/10" : "bg-transparent"
+                          }`}
+                        >
+                          <td className="px-3 py-2 font-medium">{entry.filename || `Document ${idx + 1}`}</td>
+                          <td className="px-3 py-2">{entry.document_type}</td>
+                          <td className="px-3 py-2">
+                            {entry.analysis?.item || entry.item_requested || "—"}
+                            {entry.analysis?.item_auto_detected ? " (auto)" : ""}
+                          </td>
+                          <td className="px-3 py-2">
+                            {entry.analysis ? (entry.analysis.valid ? "oui" : "non") : "erreur"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {entry.analysis ? `${Math.round(entry.analysis.score * 100)}%` : "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {entry.analysis ? (entry.analysis.ocr_used ? "oui" : "non") : "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {entry.analysis ? `${entry.analysis.processing_time_ms} ms` : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {selectedBatchEntry && !selectedBatchEntry.success ? (
+                  <div className="mt-4 rounded-lg border border-rose-800/60 bg-rose-950/20 p-4 text-sm text-rose-200">
+                    <p className="font-semibold">{selectedBatchEntry.filename || "Document sélectionné"}</p>
+                    <p className="mt-1">{selectedBatchEntry.error || "Erreur inconnue"}</p>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {selectedAnalysis ? (
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+                {selectedBatchEntry ? (
+                  <p className="mb-3 text-sm text-slate-400">
+                    Détail du fichier: <b>{selectedBatchEntry.filename || `Document ${selectedBatchIndex + 1}`}</b>
+                  </p>
+                ) : null}
                 <p className="text-sm font-semibold text-slate-200">Score</p>
                 <div className="mt-2 space-y-1 text-sm text-slate-300">
                   <p>
                     Score global: <b>{scorePercent}%</b>
                   </p>
                   <p>
-                    Validité: <b>{result.valid ? "valide" : "invalide"}</b>
+                    Validité: <b>{selectedAnalysis.valid ? "valide" : "invalide"}</b>
                   </p>
                   <p>
-                    Variant: <b>{result.variant_detected || "non détectée"}</b> (score{" "}
-                    {result.variant_score.toFixed(2)})
+                    Item: <b>{selectedAnalysis.item}</b>
+                    {selectedAnalysis.item_auto_detected ? " (auto-détecté)" : ""}
                   </p>
                   <p>
-                    Poids détecté: <b>{result.matched_weight_sum}</b> / {result.total_weight_sum}
-                    {" "}| Seuil: {result.threshold}
+                    Variant: <b>{selectedAnalysis.variant_detected || "non détectée"}</b> (score{" "}
+                    {selectedAnalysis.variant_score.toFixed(2)})
                   </p>
                   <p>
-                    Type de document: <b>{result.document_type}</b>
+                    Poids détecté: <b>{selectedAnalysis.matched_weight_sum}</b> / {selectedAnalysis.total_weight_sum}
+                    {" "}| Seuil: {selectedAnalysis.threshold}
                   </p>
                   <p>
-                    OCR: {result.ocr_used ? "oui" : "non"} (demandé: {result.ocr_mode_requested},
-                    appliqué: {result.ocr_mode_applied}, tenté:{" "}
-                    {result.ocr_attempted ? "oui" : "non"}, blocs:{" "}
-                    {result.ocr_blocks_count}) | Temps: {result.processing_time_ms} ms
+                    Type de document: <b>{selectedAnalysis.document_type}</b>
+                  </p>
+                  <p>
+                    OCR: {selectedAnalysis.ocr_used ? "oui" : "non"} (demandé: {selectedAnalysis.ocr_mode_requested},
+                    appliqué: {selectedAnalysis.ocr_mode_applied}, tenté:{" "}
+                    {selectedAnalysis.ocr_attempted ? "oui" : "non"}, blocs:{" "}
+                    {selectedAnalysis.ocr_blocks_count}) | Temps: {selectedAnalysis.processing_time_ms} ms
                   </p>
                 </div>
-                {result.ocr_error ? (
+                {selectedAnalysis.ocr_error ? (
                   <p className="mt-1 text-sm text-rose-300">
-                    Erreur OCR: {result.ocr_error}
+                    Erreur OCR: {selectedAnalysis.ocr_error}
                   </p>
                 ) : null}
                 <p className="mt-2 text-sm text-slate-300">
-                  Éléments manquants: {result.missing_elements.join(", ") || "aucun"}
+                  Éléments manquants: {selectedAnalysis.missing_elements.join(", ") || "aucun"}
                 </p>
-                {result.elements_found.length > 0 ? (
+                {selectedAnalysis.elements_found.length > 0 ? (
                   <div className="mt-3">
                     <div className="flex items-center justify-between gap-3">
                       <p className="text-sm font-medium text-slate-200">Champs détectés</p>
@@ -837,7 +1123,7 @@ export default function Home() {
                     </div>
                     {showAnalyzeDetectedFields ? (
                       <ul className="mt-1 space-y-1 text-sm text-slate-300">
-                        {result.elements_found.map((entry, idx) => (
+                        {selectedAnalysis.elements_found.map((entry, idx) => (
                           <li key={`${entry.name}-${entry.page}-${idx}`}>
                             <b>{entry.name}</b> (p.{entry.page})
                             {entry.value ? `: ${entry.value}` : ""}
@@ -857,7 +1143,7 @@ export default function Home() {
                         Résumé des champs détectés (valeurs)
                       </p>
                       <ul className="mt-2 space-y-1">
-                        {result.elements_found.map((entry, idx) => (
+                        {selectedAnalysis.elements_found.map((entry, idx) => (
                           <li key={`summary-${entry.name}-${entry.page}-${idx}`}>
                             <b>{entry.name}</b>:{" "}
                             {entry.value ||
@@ -873,7 +1159,7 @@ export default function Home() {
                     </div>
                   </div>
                 ) : null}
-                {result.document_type === "excel" ? (
+                {selectedAnalysis.document_type === "excel" ? (
                   <div className="mt-3 rounded border border-slate-700/70 bg-slate-950/60 p-3 text-xs text-slate-200">
                     <div className="flex items-center justify-between gap-3">
                       <p className="font-semibold text-slate-100">
@@ -888,9 +1174,9 @@ export default function Home() {
                       </button>
                     </div>
                     {showAnalyzeDebug ? (
-                      result.excel_pairs_preview.length > 0 ? (
+                      selectedAnalysis.excel_pairs_preview.length > 0 ? (
                         <ul className="mt-2">
-                          {result.excel_pairs_preview.map((line, idx) => (
+                          {selectedAnalysis.excel_pairs_preview.map((line, idx) => (
                             <li
                               key={`excel-pair-${idx}`}
                               className="border-t border-slate-800 py-2 first:border-t-0 first:pt-0 last:pb-0"
@@ -996,6 +1282,20 @@ export default function Home() {
                   Dupliquer
                 </button>
               </div>
+
+              {guidedMessage ? (
+                <p
+                  className={`mt-3 rounded-lg border px-3 py-2 text-sm ${
+                    guidedMessageTone === "success"
+                      ? "border-emerald-700/70 bg-emerald-950/30 text-emerald-200"
+                      : guidedMessageTone === "error"
+                        ? "border-rose-700/70 bg-rose-950/30 text-rose-200"
+                        : "border-slate-700 bg-slate-900 text-slate-300"
+                  }`}
+                >
+                  {guidedMessage}
+                </p>
+              ) : null}
             </div>
 
             {guidedItemConfig ? (
@@ -1383,10 +1683,6 @@ export default function Home() {
                   </div>
                 </div>
               </div>
-            ) : null}
-
-            {guidedMessage ? (
-              <p className="mt-3 text-sm text-slate-300">{guidedMessage}</p>
             ) : null}
 
             <div className="mt-6 border-t border-slate-800 pt-4">

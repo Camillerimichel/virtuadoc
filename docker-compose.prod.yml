@@ -28,6 +28,8 @@ services:
     command: ["uvicorn", "document_engine.main:app", "--host", "0.0.0.0", "--port", "8090"]
     ports:
       - "127.0.0.1:8090:8090"
+    volumes:
+      - /var/lib/virtuadoc/document_engine_config:/workspace/document_engine/config
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3).read()"]
