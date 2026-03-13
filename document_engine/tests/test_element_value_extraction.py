@@ -127,3 +127,55 @@ def test_relative_anchor_ignores_other_column_lines() -> None:
 
     assert len(detections) == 1
     assert detections[0].meta.get("target_text") == "JEAN DUPONT"
+
+
+def test_relative_anchor_accepts_multiple_target_keywords() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="label", x0=20, y0=740, x1=260, y1=760, text="Gestion, direction"),
+        LayoutZone(page=1, zone_type="paragraph", x0=20, y0=710, x1=300, y1=730, text="Direction"),
+        LayoutZone(page=1, zone_type="paragraph", x0=20, y0=680, x1=320, y1=700, text="JEAN DUPONT"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[
+            {
+                "name": "president_nom",
+                "weight": 2,
+                "strategy": "relative_anchor",
+                "anchor": {"keyword": "Gestion, direction", "occurrence": 1},
+                "move": {"lines_below": 1, "tolerance": 0},
+                "target": {"keyword": "nom, direction", "mode": "contains"},
+            }
+        ],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].meta.get("target_text") == "Direction"
+    assert detections[0].meta.get("field_value") == "JEAN DUPONT"
+
+
+def test_relative_anchor_supports_ocr_coordinates_growing_downward() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="paragraph", x0=90, y0=964, x1=178, y1=989, text="Président"),
+        LayoutZone(page=1, zone_type="paragraph", x0=144, y0=992, x1=273, y1=1017, text="Nom, prénoms"),
+        LayoutZone(page=1, zone_type="paragraph", x0=389, y0=987, x1=639, y1=1017, text="CAMILLERI Michel Rosario"),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[
+            {
+                "name": "president_nom",
+                "weight": 1,
+                "strategy": "relative_anchor",
+                "anchor": {"keyword": "Président", "occurrence": 1},
+                "move": {"lines_below": 1, "tolerance": 0},
+                "target": {"keyword": "Nom", "mode": "contains"},
+            }
+        ],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].meta.get("target_text") == "Nom, prénoms"
+    assert detections[0].meta.get("field_value") == "CAMILLERI Michel Rosario"

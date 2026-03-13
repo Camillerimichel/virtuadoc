@@ -25,13 +25,13 @@ required_elements:
   weight: 1
   strategy: relative_anchor
   anchor:
-    keyword: Gestion, direction
+    keyword: Président
     occurrence: 1
   move:
-    lines_below: 2
-    tolerance: 1
+    lines_below: 1
+    tolerance: 0
   target:
-    keyword: nom
+    keyword: Nom
     mode: contains
 variants:
 - kbis_v1

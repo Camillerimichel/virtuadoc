@@ -8,12 +8,18 @@ from document_engine.model_types import OcrBlock
 
 
 class OcrEngine:
+    _shared_instances: dict[str, Any] = {}
+
     def __init__(self, language: str = "fr") -> None:
         self.language = language
         self._ocr = None
 
     def _lazy_init(self) -> None:
         if self._ocr is not None:
+            return
+        shared = self._shared_instances.get(self.language)
+        if shared is not None:
+            self._ocr = shared
             return
         from paddleocr import PaddleOCR  # lazy import to keep startup lightweight
         os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -35,6 +41,7 @@ class OcrEngine:
         ):
             try:
                 self._ocr = PaddleOCR(**kwargs)
+                self._shared_instances[self.language] = self._ocr
                 return
             except Exception:
                 continue

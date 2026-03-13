@@ -54,6 +54,8 @@ class ElementDetector:
         zones_by_page: dict[int, list[LayoutZone]],
     ) -> DetectionResult | None:
         for page, zones in zones_by_page.items():
+            best_result: DetectionResult | None = None
+            best_score = -1
             for zone in zones:
                 lowered_zone = zone.text.lower()
                 if any(alias.lower() in lowered_zone for alias in aliases):
@@ -88,7 +90,17 @@ class ElementDetector:
                         meta["right_text"] = right_text
                     if below_text:
                         meta["below_text"] = below_text
-                    return DetectionResult(name=name, page=page, evidence="text-match", meta=meta)
+                    candidate_score = 1
+                    if value:
+                        candidate_score = 3
+                    elif right_text or below_text:
+                        candidate_score = 2
+
+                    if candidate_score > best_score:
+                        best_score = candidate_score
+                        best_result = DetectionResult(name=name, page=page, evidence="text-match", meta=meta)
+            if best_result is not None:
+                return best_result
 
         for page, content in page_text.items():
             lowered = content.lower()
@@ -96,8 +108,14 @@ class ElementDetector:
             if fuzzy >= 90:
                 return DetectionResult(name=name, page=page, evidence="fuzzy-match", confidence=fuzzy / 100)
 
-            if self._regex_match(name, content):
-                return DetectionResult(name=name, page=page, evidence="regex")
+            regex_value = self._regex_search(name, content)
+            if regex_value:
+                return DetectionResult(
+                    name=name,
+                    page=page,
+                    evidence="regex",
+                    meta={"field_value": regex_value, "value_position": "regex"},
+                )
 
         return None
 
@@ -112,8 +130,8 @@ class ElementDetector:
         target = element.get("target", {}) if isinstance(element.get("target"), dict) else {}
 
         anchor_keyword = str(anchor.get("keyword", "")).strip()
-        target_keyword = str(target.get("keyword", "")).strip()
-        if not anchor_keyword or not target_keyword:
+        target_keywords = self._split_keywords(target.get("keyword", ""))
+        if not anchor_keyword or not target_keywords:
             return None
 
         occurrence = max(self._safe_int(anchor.get("occurrence"), 1), 1)
@@ -137,7 +155,7 @@ class ElementDetector:
 
             for idx in range(start, end + 1):
                 line = below_lines[idx]
-                if self._match_mode(line.text, target_keyword, mode):
+                if any(self._match_mode(line.text, keyword, mode) for keyword in target_keywords):
                     target_right_zone = self._find_right_candidate(line, lines)
                     target_below_zone = self._find_below_candidate(line, lines)
                     target_right_text = self._clean_preview_text(target_right_zone.text) if target_right_zone else None
@@ -162,27 +180,36 @@ class ElementDetector:
         return None
 
     def _lines_below_same_column(self, anchor_line: LayoutZone, lines: list[LayoutZone]) -> list[LayoutZone]:
-        # Keep only lines visually below anchor (PDF y decreases when going down)
-        below = [line for line in lines if line is not anchor_line and line.y1 <= anchor_line.y0 + 2.0]
-        if not below:
-            return []
-
         anchor_width = max(anchor_line.x1 - anchor_line.x0, 1.0)
-        min_overlap = min(40.0, anchor_width * 0.4)
+        min_overlap = min(30.0, anchor_width * 0.35)
 
         def same_column_score(line: LayoutZone) -> tuple[float, float]:
             overlap = min(anchor_line.x1, line.x1) - max(anchor_line.x0, line.x0)
             x_center_delta = abs(((line.x0 + line.x1) / 2) - ((anchor_line.x0 + anchor_line.x1) / 2))
             return overlap, x_center_delta
 
-        candidates = []
-        for line in below:
+        pdf_below: list[tuple[float, float, LayoutZone]] = []
+        image_below: list[tuple[float, float, LayoutZone]] = []
+        for line in lines:
+            if line is anchor_line:
+                continue
             overlap, x_center_delta = same_column_score(line)
             if overlap < min_overlap and x_center_delta > anchor_width * 0.8:
                 continue
-            vertical_gap = anchor_line.y0 - line.y1
-            candidates.append((vertical_gap, x_center_delta, line))
 
+            # Native PDF blocks usually use a bottom-left origin, while OCR blocks use a top-left origin.
+            if line.y1 <= anchor_line.y0 + 2.0:
+                pdf_below.append((anchor_line.y0 - line.y1, x_center_delta, line))
+            if line.y0 >= anchor_line.y1 - 2.0:
+                image_below.append((line.y0 - anchor_line.y1, x_center_delta, line))
+
+        candidates = pdf_below
+        best_pdf_gap = min((gap for gap, _, _ in pdf_below), default=None)
+        best_image_gap = min((gap for gap, _, _ in image_below), default=None)
+        if image_below and (best_pdf_gap is None or (best_image_gap is not None and best_image_gap < best_pdf_gap)):
+            candidates = image_below
+        if not candidates:
+            return []
         candidates.sort(key=lambda c: (c[0], c[1]))
         return [line for _, _, line in candidates]
 
@@ -190,9 +217,16 @@ class ElementDetector:
         aliases = self.global_rules.get("aliases", {}).get(name, [])
         return [name, *aliases]
 
-    def _regex_match(self, name: str, content: str) -> bool:
+    def _regex_search(self, name: str, content: str) -> str | None:
         patterns = self.global_rules.get("regex", {}).get(name, [])
-        return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns)
+        for pattern in patterns:
+            match = re.search(pattern, content, flags=re.IGNORECASE)
+            if match is None:
+                continue
+            value = match.group(0).strip()
+            if value:
+                return value
+        return None
 
     def _match_mode(self, text: str, keyword: str, mode: str) -> bool:
         source = " ".join(text.lower().split())
@@ -213,6 +247,14 @@ class ElementDetector:
             return int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return default
+
+    def _split_keywords(self, value: object) -> list[str]:
+        if isinstance(value, str):
+            parts = re.split(r"[,;\n|]+", value)
+            return [part.strip() for part in parts if part.strip()]
+        if isinstance(value, list):
+            return [str(part).strip() for part in value if str(part).strip()]
+        return []
 
     def _detect_visual_hints(self, page_text: dict[int, str]) -> list[DetectionResult]:
         visual_results: list[DetectionResult] = []
@@ -270,13 +312,16 @@ class ElementDetector:
 
     def _find_right_candidate(self, label_zone: LayoutZone, page_zones: list[LayoutZone]) -> LayoutZone | None:
         label_height = max(abs(label_zone.y1 - label_zone.y0), 1.0)
-        row_tolerance = max(8.0, label_height * 0.7)
+        row_tolerance = max(8.0, label_height * 0.5)
+        max_candidate_height = max(48.0, label_height * 2.5)
 
         candidates = []
         for zone in page_zones:
             if zone is label_zone:
                 continue
             if zone.x0 <= label_zone.x1:
+                continue
+            if abs(zone.y1 - zone.y0) > max_candidate_height:
                 continue
 
             # For "right", keep only zones that share substantially the same row.

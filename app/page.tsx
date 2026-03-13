@@ -161,7 +161,7 @@ export default function Home() {
   const [templates, setTemplates] = useState<string[]>([]);
 
   const [item, setItem] = useState("contrat_assurance_vie");
-  const [analyzeOcrMode, setAnalyzeOcrMode] = useState<"native" | "ocr">("native");
+  const [analyzeOcrMode, setAnalyzeOcrMode] = useState<"auto" | "native" | "ocr">("auto");
   const [analyzeExcelHeaderAxis, setAnalyzeExcelHeaderAxis] =
     useState<"first_row" | "first_column">("first_row");
   const [file, setFile] = useState<File | null>(null);
@@ -293,7 +293,7 @@ export default function Home() {
     }
 
     if (documentType === "excel" && analyzeOcrMode === "ocr") {
-      setAnalyzeOcrMode("native");
+      setAnalyzeOcrMode("auto");
     }
 
     pushAnalyzeTrace(`Validation OK: ${file.name} (${documentType})`);
@@ -635,6 +635,17 @@ export default function Home() {
                 <div className="flex gap-2">
                   <button
                     type="button"
+                    onClick={() => setAnalyzeOcrMode("auto")}
+                    className={`rounded-lg px-3 py-2 text-sm font-semibold ${
+                      analyzeOcrMode === "auto"
+                        ? "bg-emerald-400 text-slate-950"
+                        : "bg-slate-800 text-slate-200"
+                    }`}
+                  >
+                    Auto
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setAnalyzeOcrMode("native")}
                     className={`rounded-lg px-3 py-2 text-sm font-semibold ${
                       analyzeOcrMode === "native"
@@ -658,7 +669,7 @@ export default function Home() {
                   </button>
                 </div>
                 <p className="mt-1 text-xs text-slate-400">
-                  Natif = extraction texte PDF/Excel. OCR = forcer lecture image/scanner (PDF uniquement).
+                  Auto = natif puis OCR si la détection est faible. Natif = extraction texte PDF/Excel. OCR = forcer lecture image/scanner (PDF uniquement).
                 </p>
               </div>
 
@@ -1116,7 +1127,11 @@ export default function Home() {
                                   setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
                                 }}
                                 className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                placeholder="nom, direction"
                               />
+                              <span className="mt-1 block text-[11px] text-slate-500">
+                                Plusieurs mots-clés possibles, séparés par des virgules.
+                              </span>
                             </label>
                             <label className="text-xs text-slate-300">
                               Mode de match

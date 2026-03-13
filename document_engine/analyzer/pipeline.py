@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 import time
 import uuid
 from pathlib import Path
@@ -14,7 +16,7 @@ from document_engine.core.ocr_engine import OcrEngine
 from document_engine.core.excel_extractor import ExcelExtractor
 from document_engine.core.pdf_loader import PdfLoader
 from document_engine.core.text_extractor import TextExtractor
-from document_engine.model_types import LayoutZone, OcrBlock
+from document_engine.model_types import LayoutZone, OcrBlock, TextBlock
 
 
 class AnalyzePipeline:
@@ -40,6 +42,8 @@ class AnalyzePipeline:
         item_config = self.item_loader.load_item(item_name)
         global_rules = self.item_loader.load_global_rules()
         detector = ElementDetector(global_rules)
+        required_elements = item_config.get("required_elements", [])
+        threshold = float(item_config.get("threshold", 0.7))
 
         document_id = str(uuid.uuid4())
         doc_type = document_type if document_type in {"pdf", "excel"} else "pdf"
@@ -54,6 +58,8 @@ class AnalyzePipeline:
             pdf_bytes = self.pdf_loader.decode_base64_pdf(base64_document)
             tmp_path = self.pdf_loader.persist_temp(pdf_bytes, Path("/tmp/document_engine"), f"{document_id}.pdf")
             full_text, text_blocks, page_count = self.text_extractor.extract(pdf_bytes)
+            text_blocks = self._filter_watermark_text_blocks(text_blocks)
+            full_text = "\n".join(block.text for block in text_blocks)
         native_text_length = len(full_text)
         ocr_used = False
         ocr_blocks = []
@@ -67,10 +73,27 @@ class AnalyzePipeline:
             if requested_mode == "ocr":
                 ocr_error = "OCR is not supported for Excel native files"
 
-        should_try_ocr = (
-            doc_type == "pdf"
-            and (requested_mode == "ocr" or (requested_mode == "auto" and len(full_text) < 200))
-        )
+        zones = self.layout_parser.build_zones(text_blocks)
+        signature = self.structure_detector.compute_signature(page_count, full_text, zones)
+        variants = item_config.get("variant_signatures", [])
+        variant_name, variant_score, variant_match = self.variant_matcher.match(signature, variants)
+        detections = detector.detect(required_elements, zones, [])
+        completeness_score = self.scoring_engine.compute(required_elements, detections)
+
+        should_try_ocr = False
+        if doc_type == "pdf":
+            if requested_mode == "ocr":
+                should_try_ocr = True
+            elif requested_mode == "auto":
+                should_try_ocr = self._should_retry_with_ocr(
+                    full_text=full_text,
+                    text_blocks=text_blocks,
+                    required_elements=required_elements,
+                    detections=detections,
+                    completeness_score=completeness_score,
+                    threshold=threshold,
+                )
+
         if should_try_ocr:
             ocr_attempted = True
             try:
@@ -78,6 +101,7 @@ class AnalyzePipeline:
                     raise RuntimeError("Missing temporary PDF path for OCR")
                 ocr_engine = OcrEngine(language=item_config.get("language", "fr"))
                 ocr_blocks = ocr_engine.run(tmp_path)
+                ocr_blocks = self._filter_watermark_ocr_blocks(ocr_blocks)
                 full_text = full_text + "\n" + "\n".join(b.text for b in ocr_blocks)
                 ocr_used = len(ocr_blocks) > 0
                 if requested_mode == "auto":
@@ -88,19 +112,12 @@ class AnalyzePipeline:
                 if requested_mode == "auto":
                     applied_mode = "native"
 
-        zones = self.layout_parser.build_zones(text_blocks)
         if ocr_blocks:
             zones.extend(self._zones_from_ocr_blocks(ocr_blocks))
-        signature = self.structure_detector.compute_signature(page_count, full_text, zones)
-
-        variants = item_config.get("variant_signatures", [])
-        variant_name, variant_score, variant_match = self.variant_matcher.match(signature, variants)
-
-        required_elements = item_config.get("required_elements", [])
         detections = detector.detect(required_elements, zones, [b.text for b in ocr_blocks])
-
         completeness_score = self.scoring_engine.compute(required_elements, detections)
-        threshold = float(item_config.get("threshold", 0.7))
+        signature = self.structure_detector.compute_signature(page_count, full_text, zones)
+        variant_name, variant_score, variant_match = self.variant_matcher.match(signature, variants)
         valid = variant_match and completeness_score >= threshold
         detected_names = {d.name for d in detections}
         total_weight = sum(float(e.get("weight", 1)) for e in required_elements) or 1.0
@@ -197,3 +214,108 @@ class AnalyzePipeline:
             if len(pairs) >= limit:
                 break
         return pairs
+
+    def _should_retry_with_ocr(
+        self,
+        full_text: str,
+        text_blocks: list,
+        required_elements: list[dict],
+        detections: list,
+        completeness_score: float,
+        threshold: float,
+    ) -> bool:
+        if len(full_text.strip()) < 200:
+            return True
+        if len(text_blocks) < 8:
+            return True
+        if not required_elements:
+            return False
+
+        missing_count = max(len(required_elements) - len(detections), 0)
+        missing_ratio = missing_count / len(required_elements)
+        effective_threshold = min(max(threshold, 0.45), 0.85)
+        return completeness_score < effective_threshold and missing_ratio >= 0.3
+
+    def _filter_watermark_text_blocks(self, text_blocks: list[TextBlock]) -> list[TextBlock]:
+        return [block for block in text_blocks if not self._is_watermark_candidate(block, text_blocks)]
+
+    def _filter_watermark_ocr_blocks(self, ocr_blocks: list[OcrBlock]) -> list[OcrBlock]:
+        return [block for block in ocr_blocks if not self._is_watermark_candidate(block, ocr_blocks)]
+
+    def _is_watermark_candidate(self, block: TextBlock | OcrBlock, siblings: list[TextBlock] | list[OcrBlock]) -> bool:
+        text = " ".join(block.text.split())
+        normalized = self._normalize_watermark_text(text)
+        if len(normalized) < 4 or len(normalized) > 48:
+            return False
+        if ":" in text or len(text.split()) > 6:
+            return False
+
+        letters = [char for char in text if char.isalpha()]
+        uppercase_ratio = (
+            sum(1 for char in letters if char.isupper()) / len(letters)
+            if letters
+            else 0.0
+        )
+        if uppercase_ratio < 0.6:
+            return False
+
+        x0, y0, x1, y1 = self._block_bounds(block)
+        page_width, page_height = self._page_extent(block.page, siblings)
+        if page_width <= 0 or page_height <= 0:
+            return False
+
+        width_ratio = max(x1 - x0, 0.0) / page_width
+        center_x_ratio = ((x0 + x1) / 2) / page_width
+        center_y_ratio = ((y0 + y1) / 2) / page_height
+        repeated_pages = {
+            sibling.page
+            for sibling in siblings
+            if self._normalize_watermark_text(sibling.text) == normalized
+        }
+        repeated = len(repeated_pages) >= 2
+
+        centered = 0.2 <= center_x_ratio <= 0.8 and 0.2 <= center_y_ratio <= 0.8
+        if isinstance(block, OcrBlock):
+            angle = self._ocr_block_angle_deg(block)
+            diagonal = 15.0 <= angle <= 75.0
+            if diagonal and centered and width_ratio >= 0.2:
+                return True
+
+        return centered and width_ratio >= 0.35 and (repeated or width_ratio >= 0.55)
+
+    def _normalize_watermark_text(self, text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+    def _block_bounds(self, block: TextBlock | OcrBlock) -> tuple[float, float, float, float]:
+        if isinstance(block, TextBlock):
+            return block.x0, block.y0, block.x1, block.y1
+        xs = [point[0] for point in block.bounding_box]
+        ys = [point[1] for point in block.bounding_box]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _ocr_block_angle_deg(self, block: OcrBlock) -> float:
+        if len(block.bounding_box) < 2:
+            return 0.0
+        p0 = block.bounding_box[0]
+        p1 = block.bounding_box[1]
+        dx = float(p1[0]) - float(p0[0])
+        dy = float(p1[1]) - float(p0[1])
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return 0.0
+        angle = abs(math.degrees(math.atan2(dy, dx)))
+        if angle > 90.0:
+            angle = 180.0 - angle
+        return angle
+
+    def _page_extent(self, page: int, blocks: list[TextBlock] | list[OcrBlock]) -> tuple[float, float]:
+        page_blocks = [block for block in blocks if block.page == page]
+        if not page_blocks:
+            return 0.0, 0.0
+
+        x_max = 0.0
+        y_max = 0.0
+        for block in page_blocks:
+            _, _, x1, y1 = self._block_bounds(block)
+            x_max = max(x_max, x1)
+            y_max = max(y_max, y1)
+        return max(x_max, 600.0), max(y_max, 800.0)
