@@ -51,7 +51,7 @@ type AnalyzeResponse = {
 
 type DocumentType = "pdf" | "excel";
 
-type Tab = "analyze" | "config" | "training";
+type Tab = "analyze" | "settings" | "training";
 type ConfigKind = "item" | "template" | "global";
 
 type RequiredElement = {
@@ -185,6 +185,7 @@ export default function Home() {
   const [guidedBusy, setGuidedBusy] = useState(false);
   const [guidedMessage, setGuidedMessage] = useState<string | null>(null);
   const [showConfigHelp, setShowConfigHelp] = useState(false);
+  const [duplicateItemName, setDuplicateItemName] = useState("");
 
   const [trainingItem, setTrainingItem] = useState("nouvel_item");
   const [trainingExcelHeaderAxis, setTrainingExcelHeaderAxis] =
@@ -452,6 +453,68 @@ export default function Home() {
     }
   };
 
+  const duplicateGuidedItem = async () => {
+    if (!guidedItemConfig) return;
+    const nextItemName = duplicateItemName.trim();
+    if (!nextItemName) {
+      setGuidedMessage("Renseigne un nom d'item pour la duplication.");
+      return;
+    }
+
+    setGuidedBusy(true);
+    setGuidedMessage(null);
+    try {
+      const payload: ItemConfig = {
+        ...guidedItemConfig,
+        item: nextItemName,
+        variants: guidedItemConfig.variant_signatures.map((v) => v.name),
+      };
+      await fetchJson(`/api/document-engine/config/items/${nextItemName}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload }),
+      });
+      await refreshLists();
+      setGuidedItemName(nextItemName);
+      setGuidedItemConfig(payload);
+      setDuplicateItemName("");
+      setGuidedMessage(`Item dupliqué vers '${nextItemName}'.`);
+    } catch (err) {
+      setGuidedMessage(err instanceof Error ? err.message : "Erreur de duplication");
+    } finally {
+      setGuidedBusy(false);
+    }
+  };
+
+  const deleteGuidedItem = async () => {
+    if (!guidedItemName) return;
+    if (!window.confirm(`Supprimer définitivement l'item '${guidedItemName}' ?`)) {
+      return;
+    }
+
+    setGuidedBusy(true);
+    setGuidedMessage(null);
+    try {
+      await fetchJson(`/api/document-engine/config/items/${guidedItemName}`, {
+        method: "DELETE",
+      });
+      await refreshLists();
+      const remainingItems = items.filter((name) => name !== guidedItemName);
+      const nextItemName = remainingItems[0] || "nouvel_item";
+      setGuidedItemName(nextItemName);
+      if (remainingItems.length > 0) {
+        await loadGuidedItem(nextItemName);
+      } else {
+        setGuidedItemConfig(emptyItemConfig(nextItemName));
+      }
+      setGuidedMessage(`Item '${guidedItemName}' supprimé.`);
+    } catch (err) {
+      setGuidedMessage(err instanceof Error ? err.message : "Erreur de suppression");
+    } finally {
+      setGuidedBusy(false);
+    }
+  };
+
   const onTrainingFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []).filter((f) => detectDocumentType(f) !== null);
     setTrainingFiles(files);
@@ -546,7 +609,7 @@ export default function Home() {
       await refreshLists();
       clearTrainingFiles();
       setGuidedItemName(result.item);
-      setTab("config");
+      setTab("settings");
       pushTrainingTrace("Training terminé avec succès");
       setTrainingMessage(
         `Item '${result.item}' généré et sauvegardé (${result.saved_to}).`,
@@ -575,7 +638,7 @@ export default function Home() {
         <div className="mt-6 flex flex-wrap gap-2">
           {([
             ["analyze", "Analyse"],
-            ["config", "Paramétrage"],
+            ["settings", "Réglages"],
             ["training", "Training"],
           ] as const).map(([key, label]) => (
             <button
@@ -826,9 +889,14 @@ export default function Home() {
                     </div>
                     {showAnalyzeDebug ? (
                       result.excel_pairs_preview.length > 0 ? (
-                        <ul className="mt-2 space-y-1">
+                        <ul className="mt-2">
                           {result.excel_pairs_preview.map((line, idx) => (
-                            <li key={`excel-pair-${idx}`}>{line}</li>
+                            <li
+                              key={`excel-pair-${idx}`}
+                              className="border-t border-slate-800 py-2 first:border-t-0 first:pt-0 last:pb-0"
+                            >
+                              {line}
+                            </li>
                           ))}
                         </ul>
                       ) : (
@@ -842,10 +910,10 @@ export default function Home() {
           </section>
         ) : null}
 
-        {tab === "config" ? (
+        {tab === "settings" ? (
           <section className="mt-6 rounded-xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-lg font-semibold">Éditeur guidé d&apos;item</h2>
+              <h2 className="text-lg font-semibold">Réglages des items</h2>
               <button
                 type="button"
                 onClick={() => setShowConfigHelp((v) => !v)}
@@ -872,47 +940,80 @@ export default function Home() {
               </div>
             ) : null}
 
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <label className="text-xs text-slate-300">
-                Item
-                <select
-                  value={guidedItemName}
-                  onChange={(e) => {
-                    const nextItem = e.target.value;
-                    setGuidedItemName(nextItem);
-                    loadGuidedItem(nextItem).catch(() => undefined);
+            <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-4">
+              <p className="text-sm font-medium text-slate-100">Gestion des items</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,2fr)_auto_auto]">
+                <label className="text-xs text-slate-300">
+                  Liste des items
+                  <select
+                    value={guidedItemName}
+                    onChange={(e) => setGuidedItemName(e.target.value)}
+                    className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                  >
+                    {items.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    loadGuidedItem().catch(() => undefined);
                   }}
-                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                  disabled={guidedBusy}
+                  className="self-end rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold text-slate-100"
                 >
-                  {items.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                onClick={() => {
-                  loadGuidedItem().catch(() => undefined);
-                }}
-                disabled={guidedBusy}
-                className="self-end rounded-lg bg-slate-700 px-3 py-2 text-sm"
-              >
-                Charger item
-              </button>
-              <button
-                type="button"
-                onClick={saveGuidedItem}
-                disabled={guidedBusy || !guidedItemConfig}
-                className="self-end rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
-              >
-                Sauvegarder item
-              </button>
+                  Modifier
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteGuidedItem}
+                  disabled={guidedBusy || !guidedItemName}
+                  className="self-end rounded-lg bg-rose-800 px-3 py-2 text-sm font-semibold text-slate-100"
+                >
+                  Supprimer
+                </button>
+              </div>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,2fr)_auto]">
+                <label className="text-xs text-slate-300">
+                  Dupliquer vers un nouvel item
+                  <input
+                    value={duplicateItemName}
+                    onChange={(e) => setDuplicateItemName(e.target.value)}
+                    placeholder="nouvel_item"
+                    className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={duplicateGuidedItem}
+                  disabled={guidedBusy || !guidedItemConfig}
+                  className="self-end rounded-lg bg-sky-700 px-3 py-2 text-sm font-semibold text-slate-100"
+                >
+                  Dupliquer
+                </button>
+              </div>
             </div>
 
             {guidedItemConfig ? (
               <div className="mt-4 space-y-4 rounded-lg border border-slate-800 bg-slate-950 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                  <div>
+                    <p className="text-sm font-medium text-slate-100">Édition de l&apos;item</p>
+                    <p className="mt-1 text-xs text-slate-400">{guidedItemName}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={saveGuidedItem}
+                    disabled={guidedBusy || !guidedItemConfig}
+                    className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950"
+                  >
+                    Sauvegarder item
+                  </button>
+                </div>
                 <div className="grid gap-3 sm:grid-cols-3">
                   <label className="text-xs text-slate-300">
                     Langue
@@ -1487,9 +1588,14 @@ export default function Home() {
                         {showTrainingDebug ? (
                           trainingResult.config.audit?.excel_pairs_preview &&
                           trainingResult.config.audit.excel_pairs_preview.length > 0 ? (
-                            <ul className="mt-2 space-y-1">
+                            <ul className="mt-2">
                               {trainingResult.config.audit.excel_pairs_preview.map((line, idx) => (
-                                <li key={`training-excel-pair-${idx}`}>{line}</li>
+                                <li
+                                  key={`training-excel-pair-${idx}`}
+                                  className="border-t border-slate-800 py-2 first:border-t-0 first:pt-0 last:pb-0"
+                                >
+                                  {line}
+                                </li>
                               ))}
                             </ul>
                           ) : (
