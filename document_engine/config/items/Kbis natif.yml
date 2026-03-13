@@ -1,0 +1,72 @@
+item: Kbis natif
+language: fr
+template: contract
+threshold: 0.7
+required_elements:
+  - name: Immatriculation au RCS, numéro
+    weight: 1
+    strategy: keyword
+  - name: Date d'immatriculation
+    weight: 1
+    strategy: keyword
+  - name: Dénomination ou raison sociale
+    weight: 1
+    strategy: keyword
+  - name: Forme juridique
+    weight: 1
+    strategy: keyword
+  - name: Capital
+    weight: 1
+    strategy: keyword
+  - name: Adresse du siège
+    weight: 1
+    strategy: keyword
+  - name: Président
+    weight: 1
+    strategy: relative_anchor
+    anchor:
+      keyword: Président
+      occurrence: 1
+    move:
+      lines_below: 1
+      tolerance: 1
+    target:
+      keyword: Nom
+      mode: contains
+  - name: Directeur
+    weight: 1
+    strategy: relative_anchor
+    anchor:
+      keyword: Directeur
+      occurrence: 1
+    move:
+      lines_below: 1
+      tolerance: 1
+    target:
+      keyword: Nom
+      mode: contains
+variants:
+  - Autres
+variant_signatures:
+  - name: Autres
+    page_count: 2
+    dominant_keywords:
+      - NAF
+      - extrait
+      - immatriculation
+      - activités
+    table_presence: false
+    title_patterns:
+      - 36 RUE VICTOR HUGO
+      - BP 195
+      - 33504 LIBOURNE CEDEX
+      - EXTRAIT D'IMMATRICULATION PRINCIPALE AU REGISTRE DU COMMERCE ET DES SOCIETES
+      - IDENTIFICATION DE LA PERSONNE MORALE
+audit:
+  sample_count: 5
+  page_distribution:
+    "1": 3
+    "2": 2
+  document_type: pdf
+  excel_header_axis: null
+  excel_pairs_preview: []

@@ -183,18 +183,23 @@ class ElementDetector:
         anchor_width = max(anchor_line.x1 - anchor_line.x0, 1.0)
         min_overlap = min(30.0, anchor_width * 0.35)
 
-        def same_column_score(line: LayoutZone) -> tuple[float, float]:
+        def same_column_score(line: LayoutZone) -> tuple[float, float, float]:
             overlap = min(anchor_line.x1, line.x1) - max(anchor_line.x0, line.x0)
             x_center_delta = abs(((line.x0 + line.x1) / 2) - ((anchor_line.x0 + anchor_line.x1) / 2))
-            return overlap, x_center_delta
+            x_left_delta = abs(line.x0 - anchor_line.x0)
+            return overlap, x_center_delta, x_left_delta
 
         pdf_below: list[tuple[float, float, LayoutZone]] = []
         image_below: list[tuple[float, float, LayoutZone]] = []
         for line in lines:
             if line is anchor_line:
                 continue
-            overlap, x_center_delta = same_column_score(line)
-            if overlap < min_overlap and x_center_delta > anchor_width * 0.8:
+            overlap, x_center_delta, x_left_delta = same_column_score(line)
+            if (
+                overlap < min_overlap
+                and x_center_delta > anchor_width * 0.8
+                and x_left_delta > max(30.0, anchor_width * 0.9)
+            ):
                 continue
 
             # Native PDF blocks usually use a bottom-left origin, while OCR blocks use a top-left origin.

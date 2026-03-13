@@ -179,3 +179,37 @@ def test_relative_anchor_supports_ocr_coordinates_growing_downward() -> None:
     assert len(detections) == 1
     assert detections[0].meta.get("target_text") == "Nom, prénoms"
     assert detections[0].meta.get("field_value") == "CAMILLERI Michel Rosario"
+
+
+def test_relative_anchor_accepts_native_label_with_small_left_shift() -> None:
+    zones = [
+        LayoutZone(page=1, zone_type="paragraph", x0=28.346, y0=454.679, x1=67.236, y1=464.679, text="Président"),
+        LayoutZone(page=1, zone_type="paragraph", x0=56.692, y0=440.759, x1=115.022, y1=450.759, text="Nom, prénoms"),
+        LayoutZone(
+            page=1,
+            zone_type="paragraph",
+            x0=233.346,
+            y0=440.819,
+            x1=352.226,
+            y1=450.819,
+            text="CAMILLERI Michel Rosario",
+        ),
+    ]
+    detections = ElementDetector(global_rules={}).detect(
+        required_elements=[
+            {
+                "name": "president_nom",
+                "weight": 1,
+                "strategy": "relative_anchor",
+                "anchor": {"keyword": "Président", "occurrence": 1},
+                "move": {"lines_below": 1, "tolerance": 1},
+                "target": {"keyword": "Nom", "mode": "contains"},
+            }
+        ],
+        zones=zones,
+        ocr_texts=[],
+    )
+
+    assert len(detections) == 1
+    assert detections[0].meta.get("target_text") == "Nom, prénoms"
+    assert detections[0].meta.get("field_value") == "CAMILLERI Michel Rosario"
