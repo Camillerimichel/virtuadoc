@@ -1,8 +1,10 @@
 "use client";
 
+import Image from "next/image";
 import {
   ChangeEvent,
   FormEvent,
+  PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -70,6 +72,7 @@ type DocumentType = "pdf" | "excel";
 
 type Tab = "analyze" | "settings" | "training";
 type ConfigKind = "item" | "template" | "global";
+type SettingsEditorTab = "required_elements" | "ocr_relative" | "variants";
 
 type RequiredElement = {
   name: string;
@@ -98,12 +101,28 @@ type VariantSignature = {
   title_patterns: string[];
 };
 
+type OcrRelativeRegion = {
+  name: string;
+  pages?: string;
+  x_pct: number;
+  y_pct: number;
+  width_pct: number;
+  height_pct: number;
+  margin_pct?: number;
+  anchor_text?: string;
+  anchor_mode?: "contains" | "exact" | "regex";
+  anchor_search_radius_pct?: number;
+  notes?: string;
+};
+
 type ItemConfig = {
   item: string;
   language: string;
   template: string;
   threshold: number;
+  variant_required?: boolean;
   required_elements: RequiredElement[];
+  ocr_regions?: OcrRelativeRegion[];
   variants: string[];
   variant_signatures: VariantSignature[];
   audit?: {
@@ -120,6 +139,13 @@ type TrainingBuildResponse = {
   item: string;
   saved_to: string;
   config: ItemConfig;
+};
+
+type RectDraft = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 function fileToBase64(file: File): Promise<string> {
@@ -166,7 +192,9 @@ function emptyItemConfig(itemName: string): ItemConfig {
     language: "fr",
     template: "contract",
     threshold: 0.7,
+    variant_required: true,
     required_elements: [],
+    ocr_regions: [],
     variants: [],
     variant_signatures: [],
   };
@@ -224,7 +252,21 @@ export default function Home() {
   const [guidedMessage, setGuidedMessage] = useState<string | null>(null);
   const [guidedMessageTone, setGuidedMessageTone] = useState<"success" | "error" | "info">("info");
   const [showConfigHelp, setShowConfigHelp] = useState(false);
+  const [settingsEditorTab, setSettingsEditorTab] =
+    useState<SettingsEditorTab>("required_elements");
   const [duplicateItemName, setDuplicateItemName] = useState("");
+  const [ocrCalibrationFile, setOcrCalibrationFile] = useState<File | null>(null);
+  const [ocrCalibrationPage, setOcrCalibrationPage] = useState(1);
+  const [ocrCalibrationPageCount, setOcrCalibrationPageCount] = useState(0);
+  const [ocrCalibrationImageUrl, setOcrCalibrationImageUrl] = useState<string | null>(null);
+  const [ocrCalibrationBusy, setOcrCalibrationBusy] = useState(false);
+  const [ocrCalibrationError, setOcrCalibrationError] = useState<string | null>(null);
+  const [ocrCalibrationDraft, setOcrCalibrationDraft] = useState<RectDraft | null>(null);
+  const [ocrCalibrationStart, setOcrCalibrationStart] = useState<{ x: number; y: number } | null>(null);
+  const [ocrCalibrationPointerId, setOcrCalibrationPointerId] = useState<number | null>(null);
+  const [pendingOcrRegionFocusIndex, setPendingOcrRegionFocusIndex] = useState<number | null>(null);
+  const calibrationImageRef = useRef<HTMLImageElement | null>(null);
+  const ocrRegionNameInputRefs = useRef<Array<HTMLInputElement | null>>([]);
 
   const [trainingItem, setTrainingItem] = useState("nouvel_item");
   const [trainingExcelHeaderAxis, setTrainingExcelHeaderAxis] =
@@ -263,6 +305,15 @@ export default function Home() {
   useEffect(() => {
     refreshLists().catch(() => undefined);
   }, [refreshLists]);
+
+  useEffect(() => {
+    if (pendingOcrRegionFocusIndex === null) return;
+    const input = ocrRegionNameInputRefs.current[pendingOcrRegionFocusIndex];
+    if (!input) return;
+    input.focus();
+    input.select();
+    setPendingOcrRegionFocusIndex(null);
+  }, [guidedItemConfig, pendingOcrRegionFocusIndex]);
 
   useEffect(() => {
     if (items.length > 0 && !items.includes(guidedItemName)) {
@@ -497,6 +548,8 @@ export default function Home() {
         ...entry,
         strategy: entry.strategy || "keyword",
       }));
+      cfg.ocr_regions = cfg.ocr_regions || [];
+      cfg.variant_required = cfg.variant_required ?? true;
       cfg.variant_signatures = cfg.variant_signatures || [];
       cfg.variants = cfg.variants || [];
       setGuidedItemConfig(cfg);
@@ -617,6 +670,157 @@ export default function Home() {
     if (trainingInputRef.current) {
       trainingInputRef.current.value = "";
     }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (ocrCalibrationImageUrl) {
+        URL.revokeObjectURL(ocrCalibrationImageUrl);
+      }
+    };
+  }, [ocrCalibrationImageUrl]);
+
+  const loadOcrCalibrationPreview = useCallback(
+    async (file: File, page: number) => {
+      setOcrCalibrationBusy(true);
+      setOcrCalibrationError(null);
+      setOcrCalibrationDraft(null);
+      setOcrCalibrationStart(null);
+      try {
+        const document = await fileToBase64(file);
+        const response = await fetch("/api/document-engine/training/render-pdf-page", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ document, page }),
+        });
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(body || "Impossible de générer l'aperçu PDF");
+        }
+        const nextPageCount = Number(response.headers.get("X-Page-Count") || "0");
+        const nextPageNumber = Number(response.headers.get("X-Page-Number") || String(page));
+        const blob = await response.blob();
+        const nextUrl = URL.createObjectURL(blob);
+        setOcrCalibrationImageUrl((previous) => {
+          if (previous) {
+            URL.revokeObjectURL(previous);
+          }
+          return nextUrl;
+        });
+        setOcrCalibrationPageCount(nextPageCount);
+        setOcrCalibrationPage(nextPageNumber);
+      } catch (err) {
+        setOcrCalibrationError(err instanceof Error ? err.message : "Erreur de preview PDF");
+      } finally {
+        setOcrCalibrationBusy(false);
+      }
+    },
+    [],
+  );
+
+  const onOcrCalibrationFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = (event.target.files || [])[0] || null;
+    setOcrCalibrationFile(file);
+    setOcrCalibrationImageUrl((previous) => {
+      if (previous) {
+        URL.revokeObjectURL(previous);
+      }
+      return null;
+    });
+    setOcrCalibrationPage(1);
+    setOcrCalibrationPageCount(0);
+    setOcrCalibrationDraft(null);
+    setOcrCalibrationStart(null);
+    setOcrCalibrationError(null);
+    if (!file) {
+      return;
+    }
+    if (detectDocumentType(file) !== "pdf") {
+      setOcrCalibrationError("La calibration visuelle OCR ne supporte que les PDF.");
+      return;
+    }
+    await loadOcrCalibrationPreview(file, 1);
+  };
+
+  const goToOcrCalibrationPage = async (page: number) => {
+    if (!ocrCalibrationFile || ocrCalibrationBusy) return;
+    await loadOcrCalibrationPreview(ocrCalibrationFile, page);
+  };
+
+  const relativePointFromPointerEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const container = event.currentTarget.getBoundingClientRect();
+    const x = Math.max(0, Math.min(container.width, event.clientX - container.left));
+    const y = Math.max(0, Math.min(container.height, event.clientY - container.top));
+    return { x, y, width: container.width, height: container.height };
+  };
+
+  const stopOcrCalibrationSelection = useCallback((event?: ReactPointerEvent<HTMLDivElement>) => {
+    if (event && ocrCalibrationPointerId !== null && event.currentTarget.hasPointerCapture(ocrCalibrationPointerId)) {
+      event.currentTarget.releasePointerCapture(ocrCalibrationPointerId);
+    }
+    setOcrCalibrationPointerId(null);
+    setOcrCalibrationStart(null);
+  }, [ocrCalibrationPointerId]);
+
+  const beginOcrCalibrationSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const point = relativePointFromPointerEvent(event);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setOcrCalibrationPointerId(event.pointerId);
+    setOcrCalibrationStart({ x: point.x, y: point.y });
+    setOcrCalibrationDraft({ x: point.x, y: point.y, width: 0, height: 0 });
+  };
+
+  const updateOcrCalibrationSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!ocrCalibrationStart || ocrCalibrationPointerId !== event.pointerId) return;
+    event.preventDefault();
+    const point = relativePointFromPointerEvent(event);
+    const nextX = Math.min(ocrCalibrationStart.x, point.x);
+    const nextY = Math.min(ocrCalibrationStart.y, point.y);
+    const nextWidth = Math.abs(point.x - ocrCalibrationStart.x);
+    const nextHeight = Math.abs(point.y - ocrCalibrationStart.y);
+    setOcrCalibrationDraft({
+      x: nextX,
+      y: nextY,
+      width: nextWidth,
+      height: nextHeight,
+    });
+  };
+
+  const appendOcrRegion = (region: OcrRelativeRegion) => {
+    if (!guidedItemConfig) return;
+    const nextRegions = [...(guidedItemConfig.ocr_regions || []), region];
+    setGuidedItemConfig({
+      ...guidedItemConfig,
+      ocr_regions: nextRegions,
+    });
+    setPendingOcrRegionFocusIndex(nextRegions.length - 1);
+  };
+
+  const addCalibrationDraftToRegions = () => {
+    if (!guidedItemConfig || !ocrCalibrationDraft || !calibrationImageRef.current) return;
+    const rect = calibrationImageRef.current.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const xPct = Number(((ocrCalibrationDraft.x / rect.width) * 100).toFixed(2));
+    const yPct = Number(((ocrCalibrationDraft.y / rect.height) * 100).toFixed(2));
+    const widthPct = Number(((ocrCalibrationDraft.width / rect.width) * 100).toFixed(2));
+    const heightPct = Number(((ocrCalibrationDraft.height / rect.height) * 100).toFixed(2));
+    appendOcrRegion({
+      name: `zone_ocr_p${ocrCalibrationPage}`,
+      pages: String(ocrCalibrationPage),
+      x_pct: xPct,
+      y_pct: yPct,
+      width_pct: widthPct,
+      height_pct: heightPct,
+      margin_pct: 2,
+      anchor_text: "",
+      anchor_mode: "contains",
+      anchor_search_radius_pct: 0,
+      notes: "",
+    });
+    setOcrCalibrationDraft(null);
+    setOcrCalibrationStart(null);
   };
 
   const pushTrainingTrace = (message: string) => {
@@ -1224,6 +1428,15 @@ export default function Home() {
                   Exemple: ancre <code>Raison sociale</code>, <code>X lignes dessous = 1</code>, cible{" "}
                   <code>OPALHE</code>.
                 </p>
+                <p className="mt-3 font-semibold text-slate-200">Repérage relatif OCR</p>
+                <p className="mt-1">
+                  Définit une zone OCR ciblée avec coordonnées relatives en pourcentage de page:
+                  <code> x_pct</code>, <code>y_pct</code>, <code>width_pct</code>, <code>height_pct</code>.
+                </p>
+                <p className="mt-1">
+                  <b>Pages</b> permet de limiter la recherche à certaines pages, par exemple <code>1</code>,
+                  <code>2-3</code> ou <code>1,4</code>.
+                </p>
               </div>
             ) : null}
 
@@ -1361,344 +1574,739 @@ export default function Home() {
                   </label>
                 </div>
 
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-sm font-medium text-slate-200">Required elements</p>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    ["required_elements", "Champs"],
+                    ["ocr_relative", "Repérage relatif OCR"],
+                    ["variants", "Variants"],
+                  ] as const).map(([key, label]) => (
                     <button
+                      key={key}
                       type="button"
-                      onClick={() =>
-                        setGuidedItemConfig({
-                          ...guidedItemConfig,
-                          required_elements: [
-                            ...guidedItemConfig.required_elements,
-                            { name: "nouvel_element", weight: 1, pages: "", strategy: "keyword" },
-                          ],
-                        })
-                      }
-                      className="rounded bg-slate-700 px-2 py-1 text-xs"
+                      onClick={() => setSettingsEditorTab(key)}
+                      className={`rounded-lg px-3 py-2 text-sm font-semibold ${
+                        settingsEditorTab === key
+                          ? "bg-emerald-400 text-slate-950"
+                          : "bg-slate-900 text-slate-200"
+                      }`}
                     >
-                      + élément
+                      {label}
                     </button>
-                  </div>
-                  <div className="space-y-2">
-                    {guidedItemConfig.required_elements.map((element, idx) => (
-                      <div key={`required-${idx}`} className="rounded border border-slate-800 p-3">
-                        <div className="grid gap-2 sm:grid-cols-6">
-                          <label className="sm:col-span-2 text-xs text-slate-300">
-                            Nom de la règle
-                            <input
-                              value={element.name}
-                              onChange={(e) => {
-                                const next = [...guidedItemConfig.required_elements];
-                                next[idx] = { ...next[idx], name: e.target.value };
-                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                              }}
-                              placeholder="ex: president_nom"
-                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            />
-                          </label>
-                          <label className="text-xs text-slate-300">
-                            Pages
-                            <input
-                              value={element.pages || ""}
-                              onChange={(e) => {
-                                const next = [...guidedItemConfig.required_elements];
-                                next[idx] = { ...next[idx], pages: e.target.value };
-                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                              }}
-                              placeholder="3 ou 3-4"
-                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            />
-                            <span className="mt-1 block text-[11px] text-slate-500">
-                              Optionnel. Ex: `3`, `3-4`, `3,5`.
-                            </span>
-                          </label>
-                          <label className="text-xs text-slate-300">
-                            Stratégie
-                            <select
-                              value={element.strategy || "keyword"}
-                              onChange={(e) => {
-                                const strategy = e.target.value as "keyword" | "relative_anchor";
-                                const next = [...guidedItemConfig.required_elements];
-                                next[idx] =
-                                  strategy === "relative_anchor"
-                                    ? {
-                                        ...next[idx],
-                                        strategy,
-                                        anchor: next[idx].anchor || { keyword: "", occurrence: 1 },
-                                        move: next[idx].move || { lines_below: 1, tolerance: 0 },
-                                        target: next[idx].target || { keyword: "", mode: "contains" },
-                                      }
-                                    : { ...next[idx], strategy };
-                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                              }}
-                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            >
-                              <option value="keyword">Mot clé simple</option>
-                              <option value="relative_anchor">Repérage relatif</option>
-                            </select>
-                          </label>
-                          <label className="text-xs text-slate-300">
-                            Poids
-                            <input
-                              type="number"
-                              min="0"
-                              step="1"
-                              value={element.weight}
-                              onChange={(e) => {
-                                const next = [...guidedItemConfig.required_elements];
-                                next[idx] = { ...next[idx], weight: Number(e.target.value) };
-                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                              }}
-                              className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = guidedItemConfig.required_elements.filter((_, i) => i !== idx);
-                              setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                            }}
-                            className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
-                          >
-                            Suppr
-                          </button>
-                        </div>
+                  ))}
+                </div>
 
-                        {(element.strategy || "keyword") === "relative_anchor" ? (
-                          <div className="mt-2 grid gap-2 sm:grid-cols-6">
+                {settingsEditorTab === "required_elements" ? (
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-sm font-medium text-slate-200">Required elements</p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setGuidedItemConfig({
+                            ...guidedItemConfig,
+                            required_elements: [
+                              ...guidedItemConfig.required_elements,
+                              { name: "nouvel_element", weight: 1, pages: "", strategy: "keyword" },
+                            ],
+                          })
+                        }
+                        className="rounded bg-slate-700 px-2 py-1 text-xs"
+                      >
+                        + élément
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {guidedItemConfig.required_elements.map((element, idx) => (
+                        <div key={`required-${idx}`} className="rounded border border-slate-800 p-3">
+                          <div className="grid gap-2 sm:grid-cols-6">
                             <label className="sm:col-span-2 text-xs text-slate-300">
-                              Mot-clé ancre
+                              Nom de la règle
                               <input
-                                value={element.anchor?.keyword || ""}
+                                value={element.name}
                                 onChange={(e) => {
                                   const next = [...guidedItemConfig.required_elements];
-                                  next[idx] = {
-                                    ...next[idx],
-                                    anchor: { ...(next[idx].anchor || {}), keyword: e.target.value },
-                                  };
+                                  next[idx] = { ...next[idx], name: e.target.value };
                                   setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
                                 }}
+                                placeholder="ex: president_nom"
                                 className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
                               />
                             </label>
                             <label className="text-xs text-slate-300">
-                              Occurrence
+                              Pages
                               <input
-                                type="number"
-                                min="1"
-                                value={element.anchor?.occurrence || 1}
+                                value={element.pages || ""}
                                 onChange={(e) => {
                                   const next = [...guidedItemConfig.required_elements];
-                                  next[idx] = {
-                                    ...next[idx],
-                                    anchor: { ...(next[idx].anchor || {}), occurrence: Number(e.target.value) },
-                                  };
+                                  next[idx] = { ...next[idx], pages: e.target.value };
                                   setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
                                 }}
+                                placeholder="3 ou 3-4"
                                 className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                              />
-                            </label>
-                            <label className="text-xs text-slate-300">
-                              X lignes dessous
-                              <input
-                                type="number"
-                                value={element.move?.lines_below || 0}
-                                onChange={(e) => {
-                                  const next = [...guidedItemConfig.required_elements];
-                                  next[idx] = {
-                                    ...next[idx],
-                                    move: { ...(next[idx].move || {}), lines_below: Number(e.target.value) },
-                                  };
-                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                                }}
-                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                              />
-                            </label>
-                            <label className="text-xs text-slate-300">
-                              Tolérance ± lignes
-                              <input
-                                type="number"
-                                min="0"
-                                value={element.move?.tolerance || 0}
-                                onChange={(e) => {
-                                  const next = [...guidedItemConfig.required_elements];
-                                  next[idx] = {
-                                    ...next[idx],
-                                    move: { ...(next[idx].move || {}), tolerance: Number(e.target.value) },
-                                  };
-                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                                }}
-                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                              />
-                            </label>
-                            <label className="sm:col-span-2 text-xs text-slate-300">
-                              Mot-clé cible
-                              <input
-                                value={element.target?.keyword || ""}
-                                onChange={(e) => {
-                                  const next = [...guidedItemConfig.required_elements];
-                                  next[idx] = {
-                                    ...next[idx],
-                                    target: { ...(next[idx].target || {}), keyword: e.target.value },
-                                  };
-                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
-                                }}
-                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                                placeholder="nom, direction"
                               />
                               <span className="mt-1 block text-[11px] text-slate-500">
-                                Plusieurs mots-clés possibles, séparés par des virgules.
+                                Optionnel. Ex: `3`, `3-4`, `3,5`.
                               </span>
                             </label>
                             <label className="text-xs text-slate-300">
-                              Mode de match
+                              Stratégie
                               <select
-                                value={element.target?.mode || "contains"}
+                                value={element.strategy || "keyword"}
                                 onChange={(e) => {
+                                  const strategy = e.target.value as "keyword" | "relative_anchor";
                                   const next = [...guidedItemConfig.required_elements];
-                                  next[idx] = {
-                                    ...next[idx],
-                                    target: {
-                                      ...(next[idx].target || {}),
-                                      mode: e.target.value as "contains" | "exact" | "regex",
-                                    },
-                                  };
+                                  next[idx] =
+                                    strategy === "relative_anchor"
+                                      ? {
+                                          ...next[idx],
+                                          strategy,
+                                          anchor: next[idx].anchor || { keyword: "", occurrence: 1 },
+                                          move: next[idx].move || { lines_below: 1, tolerance: 0 },
+                                          target: next[idx].target || { keyword: "", mode: "contains" },
+                                        }
+                                      : { ...next[idx], strategy };
                                   setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
                                 }}
                                 className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
                               >
-                                <option value="contains">contient</option>
-                                <option value="exact">exact</option>
-                                <option value="regex">regex</option>
+                                <option value="keyword">Mot clé simple</option>
+                                <option value="relative_anchor">Repérage relatif</option>
                               </select>
                             </label>
+                            <label className="text-xs text-slate-300">
+                              Poids
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={element.weight}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.required_elements];
+                                  next[idx] = { ...next[idx], weight: Number(e.target.value) };
+                                  setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = guidedItemConfig.required_elements.filter((_, i) => i !== idx);
+                                setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                              }}
+                              className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
+                            >
+                              Suppr
+                            </button>
+                          </div>
+
+                          {(element.strategy || "keyword") === "relative_anchor" ? (
+                            <div className="mt-2 grid gap-2 sm:grid-cols-6">
+                              <label className="sm:col-span-2 text-xs text-slate-300">
+                                Mot-clé ancre
+                                <input
+                                  value={element.anchor?.keyword || ""}
+                                  onChange={(e) => {
+                                    const next = [...guidedItemConfig.required_elements];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      anchor: { ...(next[idx].anchor || {}), keyword: e.target.value },
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Occurrence
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={element.anchor?.occurrence || 1}
+                                  onChange={(e) => {
+                                    const next = [...guidedItemConfig.required_elements];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      anchor: { ...(next[idx].anchor || {}), occurrence: Number(e.target.value) },
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                X lignes dessous
+                                <input
+                                  type="number"
+                                  value={element.move?.lines_below || 0}
+                                  onChange={(e) => {
+                                    const next = [...guidedItemConfig.required_elements];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      move: { ...(next[idx].move || {}), lines_below: Number(e.target.value) },
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Tolérance ± lignes
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={element.move?.tolerance || 0}
+                                  onChange={(e) => {
+                                    const next = [...guidedItemConfig.required_elements];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      move: { ...(next[idx].move || {}), tolerance: Number(e.target.value) },
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="sm:col-span-2 text-xs text-slate-300">
+                                Mot-clé cible
+                                <input
+                                  value={element.target?.keyword || ""}
+                                  onChange={(e) => {
+                                    const next = [...guidedItemConfig.required_elements];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      target: { ...(next[idx].target || {}), keyword: e.target.value },
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                  placeholder="nom, direction"
+                                />
+                                <span className="mt-1 block text-[11px] text-slate-500">
+                                  Plusieurs mots-clés possibles, séparés par des virgules.
+                                </span>
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Mode de match
+                                <select
+                                  value={element.target?.mode || "contains"}
+                                  onChange={(e) => {
+                                    const next = [...guidedItemConfig.required_elements];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      target: {
+                                        ...(next[idx].target || {}),
+                                        mode: e.target.value as "contains" | "exact" | "regex",
+                                      },
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, required_elements: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                >
+                                  <option value="contains">contient</option>
+                                  <option value="exact">exact</option>
+                                  <option value="regex">regex</option>
+                                </select>
+                              </label>
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {settingsEditorTab === "ocr_relative" ? (
+                  <div>
+                    <div className="mb-4 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium text-slate-200">Calibration visuelle</p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Charge un PDF de référence, dessine une zone, puis ajoute-la aux régions OCR.
+                          </p>
+                        </div>
+                        {ocrCalibrationFile && ocrCalibrationPageCount > 0 ? (
+                          <div className="flex items-center gap-2 text-xs text-slate-400">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                goToOcrCalibrationPage(Math.max(1, ocrCalibrationPage - 1)).catch(() => undefined);
+                              }}
+                              disabled={ocrCalibrationBusy || ocrCalibrationPage <= 1}
+                              className="rounded bg-slate-800 px-2 py-1 disabled:opacity-50"
+                            >
+                              Page -
+                            </button>
+                            <span>
+                              Page {ocrCalibrationPage} / {ocrCalibrationPageCount}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                goToOcrCalibrationPage(
+                                  Math.min(ocrCalibrationPageCount, ocrCalibrationPage + 1),
+                                ).catch(() => undefined);
+                              }}
+                              disabled={ocrCalibrationBusy || ocrCalibrationPage >= ocrCalibrationPageCount}
+                              className="rounded bg-slate-800 px-2 py-1 disabled:opacity-50"
+                            >
+                              Page +
+                            </button>
                           </div>
                         ) : null}
                       </div>
-                    ))}
-                  </div>
-                </div>
 
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-sm font-medium text-slate-200">Variant signatures</p>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setGuidedItemConfig({
-                          ...guidedItemConfig,
-                          variant_signatures: [
-                            ...guidedItemConfig.variant_signatures,
-                            {
-                              name: "new_variant",
-                              page_count: 1,
-                              dominant_keywords: [],
-                              table_presence: false,
-                              title_patterns: [],
-                            },
-                          ],
-                        })
-                      }
-                      className="rounded bg-slate-700 px-2 py-1 text-xs"
-                    >
-                      + variant
-                    </button>
-                  </div>
-
-                  <div className="space-y-3">
-                    {guidedItemConfig.variant_signatures.map((variant, idx) => (
-                      <div key={`variant-${idx}`} className="rounded border border-slate-800 p-3">
-                        <div className="grid gap-2 sm:grid-cols-4">
-                          <label className="text-xs text-slate-300">
-                            Nom
-                            <input
-                              value={variant.name}
-                              onChange={(e) => {
-                                const next = [...guidedItemConfig.variant_signatures];
-                                next[idx] = { ...next[idx], name: e.target.value };
-                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                              }}
-                              className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            />
-                          </label>
-                          <label className="text-xs text-slate-300">
-                            Nombre de pages
-                            <input
-                              type="number"
-                              min="1"
-                              value={variant.page_count}
-                              onChange={(e) => {
-                                const next = [...guidedItemConfig.variant_signatures];
-                                next[idx] = { ...next[idx], page_count: Number(e.target.value) };
-                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                              }}
-                              className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                            />
-                          </label>
-                          <label className="inline-flex items-center gap-2 text-xs text-slate-300">
-                            <input
-                              type="checkbox"
-                              checked={variant.table_presence}
-                              onChange={(e) => {
-                                const next = [...guidedItemConfig.variant_signatures];
-                                next[idx] = { ...next[idx], table_presence: e.target.checked };
-                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                              }}
-                            />
-                            table_presence
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = guidedItemConfig.variant_signatures.filter((_, i) => i !== idx);
-                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                            }}
-                            className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
-                          >
-                            Suppr
-                          </button>
-                        </div>
-                        <label className="mt-2 block text-xs text-slate-300">
-                          Mots-clés dominants (séparés par virgule)
+                      <div className="mt-3 flex flex-wrap items-end gap-3">
+                        <label className="text-xs text-slate-300">
+                          PDF de référence
                           <input
-                            value={variant.dominant_keywords.join(", ")}
+                            type="file"
+                            accept=".pdf,application/pdf"
                             onChange={(e) => {
-                              const next = [...guidedItemConfig.variant_signatures];
-                              next[idx] = {
-                                ...next[idx],
-                                dominant_keywords: e.target.value
-                                  .split(",")
-                                  .map((v) => v.trim())
-                                  .filter(Boolean),
-                              };
-                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                              onOcrCalibrationFileChange(e).catch(() => undefined);
                             }}
-                            className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            className="mt-1 block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-sky-500 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-950"
                           />
                         </label>
-                        <label className="mt-2 block text-xs text-slate-300">
-                          Titres repères (séparés par virgule)
-                          <input
-                            value={variant.title_patterns.join(", ")}
-                            onChange={(e) => {
-                              const next = [...guidedItemConfig.variant_signatures];
-                              next[idx] = {
-                                ...next[idx],
-                                title_patterns: e.target.value
-                                  .split(",")
-                                  .map((v) => v.trim())
-                                  .filter(Boolean),
-                              };
-                              setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
-                            }}
-                            className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
-                          />
-                        </label>
+                        <button
+                          type="button"
+                          onClick={addCalibrationDraftToRegions}
+                          disabled={!ocrCalibrationDraft || !guidedItemConfig}
+                          className="rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950 disabled:opacity-50"
+                        >
+                          Ajouter la sélection
+                        </button>
                       </div>
-                    ))}
+
+                      {ocrCalibrationError ? (
+                        <p className="mt-2 text-sm text-rose-300">{ocrCalibrationError}</p>
+                      ) : null}
+
+                      {ocrCalibrationImageUrl ? (
+                        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-2">
+                          <p className="mb-2 text-xs text-slate-500">
+                            La zone ci-dessous se scrolle indépendamment de la page. Trace la zone avec clic gauche,
+                            puis relâche pour finaliser.
+                          </p>
+                          <div
+                            className="max-h-[75vh] overflow-auto overscroll-contain rounded border border-slate-900"
+                          >
+                            <div
+                              className="relative inline-block cursor-crosshair select-none"
+                              onDragStart={(event) => event.preventDefault()}
+                              onPointerDown={beginOcrCalibrationSelection}
+                              onPointerMove={updateOcrCalibrationSelection}
+                              onPointerUp={stopOcrCalibrationSelection}
+                              onPointerCancel={stopOcrCalibrationSelection}
+                              style={{
+                                touchAction: ocrCalibrationPointerId === null ? "auto" : "none",
+                                userSelect: "none",
+                              }}
+                            >
+                              <Image
+                                ref={calibrationImageRef}
+                                src={ocrCalibrationImageUrl}
+                                alt={`Aperçu OCR page ${ocrCalibrationPage}`}
+                                width={1200}
+                                height={1600}
+                                unoptimized
+                                draggable={false}
+                                className="block h-auto max-w-full rounded"
+                              />
+                              {ocrCalibrationDraft ? (
+                                <div
+                                  className="pointer-events-none absolute border-2 border-emerald-400 bg-emerald-400/15"
+                                  style={{
+                                    left: ocrCalibrationDraft.x,
+                                    top: ocrCalibrationDraft.y,
+                                    width: ocrCalibrationDraft.width,
+                                    height: ocrCalibrationDraft.height,
+                                  }}
+                                />
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="mb-2 flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-slate-200">Repérage relatif OCR</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Zones OCR ciblées, exprimées en pourcentage de la page.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          appendOcrRegion({
+                            name: "zone_ocr",
+                            pages: "",
+                            x_pct: 0,
+                            y_pct: 0,
+                            width_pct: 25,
+                            height_pct: 10,
+                            margin_pct: 2,
+                            anchor_text: "",
+                            anchor_mode: "contains",
+                            anchor_search_radius_pct: 0,
+                            notes: "",
+                          })
+                        }
+                        className="rounded bg-slate-700 px-2 py-1 text-xs"
+                      >
+                        + zone OCR
+                      </button>
+                    </div>
+
+                    {(guidedItemConfig.ocr_regions || []).length === 0 ? (
+                      <div className="rounded border border-dashed border-slate-700 p-4 text-sm text-slate-400">
+                        Aucune zone OCR relative définie.
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {(guidedItemConfig.ocr_regions || []).map((region, idx) => (
+                          <div key={`ocr-region-${idx}`} className="rounded border border-slate-800 p-3">
+                            <div className="grid gap-2 sm:grid-cols-6">
+                              <label className="sm:col-span-2 text-xs text-slate-300">
+                                Nom de la zone
+                                <input
+                                  ref={(element) => {
+                                    ocrRegionNameInputRefs.current[idx] = element;
+                                  }}
+                                  value={region.name}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], name: e.target.value };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  placeholder="ex: signature_bloc"
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Pages
+                                <input
+                                  value={region.pages || ""}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], pages: e.target.value };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  placeholder="1 ou 2-3"
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                                <span className="mt-1 block text-[11px] text-slate-500">
+                                  Ex: `1`, `2-3`, `1,4`.
+                                </span>
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                x %
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="0.1"
+                                  value={region.x_pct}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], x_pct: Number(e.target.value) };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                y %
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="0.1"
+                                  value={region.y_pct}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], y_pct: Number(e.target.value) };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = (guidedItemConfig.ocr_regions || []).filter((_, i) => i !== idx);
+                                  setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                }}
+                                className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
+                              >
+                                Suppr
+                              </button>
+                            </div>
+
+                            <div className="mt-2 grid gap-2 sm:grid-cols-5">
+                              <label className="text-xs text-slate-300">
+                                Largeur %
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="0.1"
+                                  value={region.width_pct}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], width_pct: Number(e.target.value) };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Hauteur %
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="0.1"
+                                  value={region.height_pct}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], height_pct: Number(e.target.value) };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Marge %
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="0.1"
+                                  value={region.margin_pct ?? 2}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], margin_pct: Number(e.target.value) };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Ancre texte
+                                <input
+                                  value={region.anchor_text || ""}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], anchor_text: e.target.value };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  placeholder="ex: signature du souscripteur"
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Mode ancre
+                                <select
+                                  value={region.anchor_mode || "contains"}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      anchor_mode: e.target.value as "contains" | "exact" | "regex",
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                >
+                                  <option value="contains">contient</option>
+                                  <option value="exact">exact</option>
+                                  <option value="regex">regex</option>
+                                </select>
+                              </label>
+                              <label className="text-xs text-slate-300">
+                                Rayon recherche ancre %
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  step="0.1"
+                                  value={region.anchor_search_radius_pct ?? 0}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = {
+                                      ...next[idx],
+                                      anchor_search_radius_pct: Number(e.target.value),
+                                    };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <label className="sm:col-span-2 text-xs text-slate-300">
+                                Notes
+                                <input
+                                  value={region.notes || ""}
+                                  onChange={(e) => {
+                                    const next = [...(guidedItemConfig.ocr_regions || [])];
+                                    next[idx] = { ...next[idx], notes: e.target.value };
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  placeholder="ex: signature en bas à droite"
+                                  className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </div>
+                ) : null}
+
+                {settingsEditorTab === "variants" ? (
+                  <div>
+                    <div className="mb-4 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+                      <label className="inline-flex items-center gap-3 text-sm text-slate-200">
+                        <input
+                          type="checkbox"
+                          checked={guidedItemConfig.variant_required ?? true}
+                          onChange={(e) =>
+                            setGuidedItemConfig({
+                              ...guidedItemConfig,
+                              variant_required: e.target.checked,
+                            })
+                          }
+                        />
+                        Exiger un match de variant pour déclarer le document valide
+                      </label>
+                      <p className="mt-2 text-xs text-slate-500">
+                        Désactive cette option si tu veux baser la validité uniquement sur la complétude des champs.
+                      </p>
+                    </div>
+
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-sm font-medium text-slate-200">Variant signatures</p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setGuidedItemConfig({
+                            ...guidedItemConfig,
+                            variant_signatures: [
+                              ...guidedItemConfig.variant_signatures,
+                              {
+                                name: "new_variant",
+                                page_count: 1,
+                                dominant_keywords: [],
+                                table_presence: false,
+                                title_patterns: [],
+                              },
+                            ],
+                          })
+                        }
+                        className="rounded bg-slate-700 px-2 py-1 text-xs"
+                      >
+                        + variant
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {guidedItemConfig.variant_signatures.map((variant, idx) => (
+                        <div key={`variant-${idx}`} className="rounded border border-slate-800 p-3">
+                          <div className="grid gap-2 sm:grid-cols-4">
+                            <label className="text-xs text-slate-300">
+                              Nom
+                              <input
+                                value={variant.name}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.variant_signatures];
+                                  next[idx] = { ...next[idx], name: e.target.value };
+                                  setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="text-xs text-slate-300">
+                              Nombre de pages
+                              <input
+                                type="number"
+                                min="1"
+                                value={variant.page_count}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.variant_signatures];
+                                  next[idx] = { ...next[idx], page_count: Number(e.target.value) };
+                                  setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                                }}
+                                className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="inline-flex items-center gap-2 text-xs text-slate-300">
+                              <input
+                                type="checkbox"
+                                checked={variant.table_presence}
+                                onChange={(e) => {
+                                  const next = [...guidedItemConfig.variant_signatures];
+                                  next[idx] = { ...next[idx], table_presence: e.target.checked };
+                                  setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                                }}
+                              />
+                              table_presence
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = guidedItemConfig.variant_signatures.filter((_, i) => i !== idx);
+                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                              }}
+                              className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
+                            >
+                              Suppr
+                            </button>
+                          </div>
+                          <label className="mt-2 block text-xs text-slate-300">
+                            Mots-clés dominants (séparés par virgule)
+                            <input
+                              value={variant.dominant_keywords.join(", ")}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.variant_signatures];
+                                next[idx] = {
+                                  ...next[idx],
+                                  dominant_keywords: e.target.value
+                                    .split(",")
+                                    .map((v) => v.trim())
+                                    .filter(Boolean),
+                                };
+                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                              }}
+                              className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            />
+                          </label>
+                          <label className="mt-2 block text-xs text-slate-300">
+                            Titres repères (séparés par virgule)
+                            <input
+                              value={variant.title_patterns.join(", ")}
+                              onChange={(e) => {
+                                const next = [...guidedItemConfig.variant_signatures];
+                                next[idx] = {
+                                  ...next[idx],
+                                  title_patterns: e.target.value
+                                    .split(",")
+                                    .map((v) => v.trim())
+                                    .filter(Boolean),
+                                };
+                                setGuidedItemConfig({ ...guidedItemConfig, variant_signatures: next });
+                              }}
+                              className="mt-1 h-10 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                            />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
 

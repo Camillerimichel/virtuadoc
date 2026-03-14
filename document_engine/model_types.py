@@ -20,6 +20,7 @@ class OcrBlock:
     page: int
     confidence: float
     bounding_box: list[list[float]]
+    region_name: str | None = None
 
 
 @dataclass(slots=True)

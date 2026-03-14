@@ -87,3 +87,8 @@ class BuildItemRequest(BaseModel):
     documents: list[str] = Field(min_length=3, max_length=10)
     document_type: Literal["pdf", "excel"] = "pdf"
     excel_header_axis: Literal["first_row", "first_column"] = "first_row"
+
+
+class RenderPdfPageRequest(BaseModel):
+    document: str = Field(min_length=1)
+    page: int = Field(ge=1, default=1)
