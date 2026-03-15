@@ -299,6 +299,18 @@ function regionFromReadingRect(rect: RelativeOverlayRect, marginPct: number): Pi
   };
 }
 
+function duplicateOcrRegion(region: OcrRelativeRegion): OcrRelativeRegion {
+  const nextName = region.name?.trim() ? `${region.name}_copy` : "zone_ocr_copy";
+  const verticalGapPct = Math.max(0.5, region.margin_pct ?? 0);
+  const maxYPct = Math.max(0, 100 - region.height_pct);
+  const nextYPct = clampDecimalInputValue(region.y_pct + region.height_pct + verticalGapPct, 0, maxYPct);
+  return {
+    ...region,
+    name: nextName,
+    y_pct: roundPct(nextYPct),
+  };
+}
+
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1076,6 +1088,17 @@ export default function Home() {
       ocr_regions: nextRegions,
     });
     setPendingOcrRegionFocusIndex(nextRegions.length - 1);
+  };
+
+  const duplicateOcrRegionAtIndex = (regionIndex: number) => {
+    if (!guidedItemConfig?.ocr_regions?.[regionIndex]) return;
+    const nextRegions = [...guidedItemConfig.ocr_regions];
+    nextRegions.splice(regionIndex + 1, 0, duplicateOcrRegion(nextRegions[regionIndex]));
+    setGuidedItemConfig({
+      ...guidedItemConfig,
+      ocr_regions: nextRegions,
+    });
+    setPendingOcrRegionFocusIndex(regionIndex + 1);
   };
 
   const addCalibrationDraftToRegions = () => {
@@ -2400,6 +2423,27 @@ export default function Home() {
                                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
                                 />
                               </label>
+                              <div className="flex items-end gap-2 sm:col-span-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    duplicateOcrRegionAtIndex(idx);
+                                  }}
+                                  className="h-10 rounded bg-sky-800 px-3 text-xs font-medium"
+                                >
+                                  Dupliquer
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = (guidedItemConfig.ocr_regions || []).filter((_, i) => i !== idx);
+                                    setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
+                                  }}
+                                  className="h-10 rounded bg-rose-800 px-3 text-xs font-medium"
+                                >
+                                  Suppr
+                                </button>
+                              </div>
                               <label className="text-xs text-slate-300">
                                 Pages
                                 <input
@@ -2444,16 +2488,6 @@ export default function Home() {
                                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
                                 />
                               </label>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const next = (guidedItemConfig.ocr_regions || []).filter((_, i) => i !== idx);
-                                  setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
-                                }}
-                                className="self-end rounded bg-rose-800 px-2 py-2 text-xs"
-                              >
-                                Suppr
-                              </button>
                             </div>
 
                             <div className="mt-2 grid gap-2 sm:grid-cols-5">
