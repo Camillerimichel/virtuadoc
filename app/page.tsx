@@ -148,6 +148,157 @@ type RectDraft = {
   height: number;
 };
 
+type DecimalInputProps = {
+  value: number;
+  onValueChange: (value: number) => void;
+  min?: number;
+  max?: number;
+  className?: string;
+};
+
+type RelativeOverlayRect = {
+  leftPct: number;
+  topPct: number;
+  widthPct: number;
+  heightPct: number;
+};
+
+type OcrRegionResizeHandle = "nw" | "ne" | "sw" | "se";
+
+type ActiveOcrRegionEdit = {
+  pointerId: number;
+  regionIndex: number;
+  mode: "move" | OcrRegionResizeHandle;
+  startX: number;
+  startY: number;
+  initialRect: RelativeOverlayRect;
+  marginPct: number;
+};
+
+function formatDecimalInputValue(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "";
+  return String(value);
+}
+
+function parseDecimalInputValue(raw: string): number | null {
+  const normalized = raw.replace(",", ".").trim();
+  if (!normalized || normalized === "." || normalized === "-" || normalized === "-.") {
+    return null;
+  }
+  const nextValue = Number(normalized);
+  return Number.isFinite(nextValue) ? nextValue : null;
+}
+
+function clampDecimalInputValue(value: number, min?: number, max?: number): number {
+  let nextValue = value;
+  if (typeof min === "number") {
+    nextValue = Math.max(min, nextValue);
+  }
+  if (typeof max === "number") {
+    nextValue = Math.min(max, nextValue);
+  }
+  return nextValue;
+}
+
+function DecimalInput({ value, onValueChange, min, max, className }: DecimalInputProps) {
+  const [draft, setDraft] = useState(() => formatDecimalInputValue(value));
+  const [isFocused, setIsFocused] = useState(false);
+  const displayValue = isFocused ? draft : formatDecimalInputValue(value);
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={displayValue}
+      onFocus={() => setIsFocused(true)}
+      onChange={(e) => {
+        const rawValue = e.target.value;
+        setDraft(rawValue);
+        const parsedValue = parseDecimalInputValue(rawValue);
+        if (parsedValue === null) return;
+        onValueChange(clampDecimalInputValue(parsedValue, min, max));
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+        const parsedValue = parseDecimalInputValue(draft);
+        if (parsedValue === null) {
+          setDraft(formatDecimalInputValue(value));
+          return;
+        }
+        const nextValue = clampDecimalInputValue(parsedValue, min, max);
+        onValueChange(nextValue);
+        setDraft(formatDecimalInputValue(nextValue));
+      }}
+      className={className}
+    />
+  );
+}
+
+function parsePagesValue(value: string | undefined): Set<number> {
+  if (!value) return new Set();
+  const pages = new Set<number>();
+  for (const rawChunk of value.replaceAll(";", ",").split(",")) {
+    const chunk = rawChunk.trim();
+    if (!chunk) continue;
+    if (chunk.includes("-")) {
+      const [leftRaw, rightRaw] = chunk.split("-", 2);
+      const left = Number(leftRaw);
+      const right = Number(rightRaw);
+      if (!Number.isInteger(left) || !Number.isInteger(right) || left <= 0 || right <= 0) continue;
+      const start = Math.min(left, right);
+      const end = Math.max(left, right);
+      for (let page = start; page <= end; page += 1) {
+        pages.add(page);
+      }
+      continue;
+    }
+    const page = Number(chunk);
+    if (Number.isInteger(page) && page > 0) {
+      pages.add(page);
+    }
+  }
+  return pages;
+}
+
+function regionAppliesToPage(region: OcrRelativeRegion, page: number): boolean {
+  const pages = parsePagesValue(region.pages);
+  return pages.size === 0 || pages.has(page);
+}
+
+function buildRegionOverlayRect(region: OcrRelativeRegion, extraMarginPct: number): RelativeOverlayRect {
+  const totalMargin = Math.max(0, region.margin_pct ?? 0) + Math.max(0, extraMarginPct);
+  const leftPct = Math.max(0, region.x_pct - totalMargin);
+  const topPct = Math.max(0, region.y_pct - totalMargin);
+  const rightPct = Math.min(100, region.x_pct + region.width_pct + totalMargin);
+  const bottomPct = Math.min(100, region.y_pct + region.height_pct + totalMargin);
+  return {
+    leftPct,
+    topPct,
+    widthPct: Math.max(0, rightPct - leftPct),
+    heightPct: Math.max(0, bottomPct - topPct),
+  };
+}
+
+function roundPct(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function regionFromReadingRect(rect: RelativeOverlayRect, marginPct: number): Pick<
+  OcrRelativeRegion,
+  "x_pct" | "y_pct" | "width_pct" | "height_pct"
+> {
+  const xPct = clampDecimalInputValue(rect.leftPct + marginPct, 0, 100);
+  const yPct = clampDecimalInputValue(rect.topPct + marginPct, 0, 100);
+  const rightPct = clampDecimalInputValue(rect.leftPct + rect.widthPct - marginPct, xPct, 100);
+  const bottomPct = clampDecimalInputValue(rect.topPct + rect.heightPct - marginPct, yPct, 100);
+  return {
+    x_pct: roundPct(xPct),
+    y_pct: roundPct(yPct),
+    width_pct: roundPct(Math.max(0.1, rightPct - xPct)),
+    height_pct: roundPct(Math.max(0.1, bottomPct - yPct)),
+  };
+}
+
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -264,8 +415,11 @@ export default function Home() {
   const [ocrCalibrationDraft, setOcrCalibrationDraft] = useState<RectDraft | null>(null);
   const [ocrCalibrationStart, setOcrCalibrationStart] = useState<{ x: number; y: number } | null>(null);
   const [ocrCalibrationPointerId, setOcrCalibrationPointerId] = useState<number | null>(null);
+  const [selectedOcrRegionIndex, setSelectedOcrRegionIndex] = useState<number | null>(null);
+  const [activeOcrRegionEdit, setActiveOcrRegionEdit] = useState<ActiveOcrRegionEdit | null>(null);
   const [pendingOcrRegionFocusIndex, setPendingOcrRegionFocusIndex] = useState<number | null>(null);
   const calibrationImageRef = useRef<HTMLImageElement | null>(null);
+  const calibrationCanvasRef = useRef<HTMLDivElement | null>(null);
   const ocrRegionNameInputRefs = useRef<Array<HTMLInputElement | null>>([]);
 
   const [trainingItem, setTrainingItem] = useState("nouvel_item");
@@ -282,6 +436,21 @@ export default function Home() {
   const selectedBatchEntry =
     batchResult && batchResult.results[selectedBatchIndex] ? batchResult.results[selectedBatchIndex] : null;
   const selectedAnalysis = selectedBatchEntry?.analysis || result;
+  const calibrationVisibleRegions = useMemo(() => {
+    if (!guidedItemConfig?.ocr_regions) return [];
+    return guidedItemConfig.ocr_regions
+      .map((region, regionIndex) => ({
+        region,
+        regionIndex,
+      }))
+      .filter(({ region }) => regionAppliesToPage(region, ocrCalibrationPage))
+      .map(({ region, regionIndex }) => ({
+        region,
+        regionIndex,
+        readingRect: buildRegionOverlayRect(region, 0),
+        searchRect: buildRegionOverlayRect(region, region.anchor_search_radius_pct ?? 0),
+      }));
+  }, [guidedItemConfig?.ocr_regions, ocrCalibrationPage]);
 
   const scorePercent = useMemo(() => {
     if (!selectedAnalysis) return 0;
@@ -731,6 +900,8 @@ export default function Home() {
     setOcrCalibrationPageCount(0);
     setOcrCalibrationDraft(null);
     setOcrCalibrationStart(null);
+    setSelectedOcrRegionIndex(null);
+    setActiveOcrRegionEdit(null);
     setOcrCalibrationError(null);
     if (!file) {
       return;
@@ -744,7 +915,17 @@ export default function Home() {
 
   const goToOcrCalibrationPage = async (page: number) => {
     if (!ocrCalibrationFile || ocrCalibrationBusy) return;
+    setSelectedOcrRegionIndex(null);
+    setActiveOcrRegionEdit(null);
     await loadOcrCalibrationPreview(ocrCalibrationFile, page);
+  };
+
+  const relativePointFromClient = (clientX: number, clientY: number) => {
+    const container = calibrationCanvasRef.current?.getBoundingClientRect();
+    if (!container) return null;
+    const x = Math.max(0, Math.min(container.width, clientX - container.left));
+    const y = Math.max(0, Math.min(container.height, clientY - container.top));
+    return { x, y, width: container.width, height: container.height };
   };
 
   const relativePointFromPointerEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -754,15 +935,35 @@ export default function Home() {
     return { x, y, width: container.width, height: container.height };
   };
 
+  const updateOcrRegionAtIndex = useCallback(
+    (regionIndex: number, updater: (region: OcrRelativeRegion) => OcrRelativeRegion) => {
+      setGuidedItemConfig((current) => {
+        if (!current?.ocr_regions || !current.ocr_regions[regionIndex]) return current;
+        const nextRegions = [...current.ocr_regions];
+        nextRegions[regionIndex] = updater(nextRegions[regionIndex]);
+        return {
+          ...current,
+          ocr_regions: nextRegions,
+        };
+      });
+    },
+    [],
+  );
+
   const stopOcrCalibrationSelection = useCallback((event?: ReactPointerEvent<HTMLDivElement>) => {
     if (event && ocrCalibrationPointerId !== null && event.currentTarget.hasPointerCapture(ocrCalibrationPointerId)) {
       event.currentTarget.releasePointerCapture(ocrCalibrationPointerId);
     }
+    if (event && activeOcrRegionEdit && event.currentTarget.hasPointerCapture(activeOcrRegionEdit.pointerId)) {
+      event.currentTarget.releasePointerCapture(activeOcrRegionEdit.pointerId);
+    }
     setOcrCalibrationPointerId(null);
     setOcrCalibrationStart(null);
-  }, [ocrCalibrationPointerId]);
+    setActiveOcrRegionEdit(null);
+  }, [activeOcrRegionEdit, ocrCalibrationPointerId]);
 
   const beginOcrCalibrationSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (activeOcrRegionEdit) return;
     if (event.button !== 0) return;
     event.preventDefault();
     const point = relativePointFromPointerEvent(event);
@@ -773,6 +974,57 @@ export default function Home() {
   };
 
   const updateOcrCalibrationSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (activeOcrRegionEdit) {
+      if (activeOcrRegionEdit.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      const point = relativePointFromClient(event.clientX, event.clientY);
+      if (!point) return;
+      const deltaXPct = (point.x - activeOcrRegionEdit.startX) / point.width * 100;
+      const deltaYPct = (point.y - activeOcrRegionEdit.startY) / point.height * 100;
+      const initialLeft = activeOcrRegionEdit.initialRect.leftPct;
+      const initialTop = activeOcrRegionEdit.initialRect.topPct;
+      const initialRight = activeOcrRegionEdit.initialRect.leftPct + activeOcrRegionEdit.initialRect.widthPct;
+      const initialBottom = activeOcrRegionEdit.initialRect.topPct + activeOcrRegionEdit.initialRect.heightPct;
+      const minWidthPct = Math.max(0.5, activeOcrRegionEdit.marginPct * 2 + 0.1);
+      const minHeightPct = Math.max(0.5, activeOcrRegionEdit.marginPct * 2 + 0.1);
+
+      let nextLeft = initialLeft;
+      let nextTop = initialTop;
+      let nextRight = initialRight;
+      let nextBottom = initialBottom;
+
+      if (activeOcrRegionEdit.mode === "move") {
+        nextLeft = clampDecimalInputValue(initialLeft + deltaXPct, 0, 100 - activeOcrRegionEdit.initialRect.widthPct);
+        nextTop = clampDecimalInputValue(initialTop + deltaYPct, 0, 100 - activeOcrRegionEdit.initialRect.heightPct);
+        nextRight = nextLeft + activeOcrRegionEdit.initialRect.widthPct;
+        nextBottom = nextTop + activeOcrRegionEdit.initialRect.heightPct;
+      } else {
+        if (activeOcrRegionEdit.mode === "nw" || activeOcrRegionEdit.mode === "sw") {
+          nextLeft = clampDecimalInputValue(initialLeft + deltaXPct, 0, initialRight - minWidthPct);
+        }
+        if (activeOcrRegionEdit.mode === "ne" || activeOcrRegionEdit.mode === "se") {
+          nextRight = clampDecimalInputValue(initialRight + deltaXPct, initialLeft + minWidthPct, 100);
+        }
+        if (activeOcrRegionEdit.mode === "nw" || activeOcrRegionEdit.mode === "ne") {
+          nextTop = clampDecimalInputValue(initialTop + deltaYPct, 0, initialBottom - minHeightPct);
+        }
+        if (activeOcrRegionEdit.mode === "sw" || activeOcrRegionEdit.mode === "se") {
+          nextBottom = clampDecimalInputValue(initialBottom + deltaYPct, initialTop + minHeightPct, 100);
+        }
+      }
+
+      const nextRect = {
+        leftPct: roundPct(nextLeft),
+        topPct: roundPct(nextTop),
+        widthPct: roundPct(nextRight - nextLeft),
+        heightPct: roundPct(nextBottom - nextTop),
+      };
+      updateOcrRegionAtIndex(activeOcrRegionEdit.regionIndex, (region) => ({
+        ...region,
+        ...regionFromReadingRect(nextRect, activeOcrRegionEdit.marginPct),
+      }));
+      return;
+    }
     if (!ocrCalibrationStart || ocrCalibrationPointerId !== event.pointerId) return;
     event.preventDefault();
     const point = relativePointFromPointerEvent(event);
@@ -785,6 +1037,34 @@ export default function Home() {
       y: nextY,
       width: nextWidth,
       height: nextHeight,
+    });
+  };
+
+  const beginOcrRegionEdit = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    regionIndex: number,
+    rect: RelativeOverlayRect,
+    marginPct: number,
+    mode: ActiveOcrRegionEdit["mode"],
+  ) => {
+    if (event.button !== 0) return;
+    const point = relativePointFromClient(event.clientX, event.clientY);
+    if (!point || !calibrationCanvasRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    calibrationCanvasRef.current.setPointerCapture(event.pointerId);
+    setSelectedOcrRegionIndex(regionIndex);
+    setOcrCalibrationDraft(null);
+    setOcrCalibrationStart(null);
+    setOcrCalibrationPointerId(null);
+    setActiveOcrRegionEdit({
+      pointerId: event.pointerId,
+      regionIndex,
+      mode,
+      startX: point.x,
+      startY: point.y,
+      initialRect: rect,
+      marginPct,
     });
   };
 
@@ -1887,12 +2167,24 @@ export default function Home() {
                         <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-2">
                           <p className="mb-2 text-xs text-slate-500">
                             La zone ci-dessous se scrolle indépendamment de la page. Trace la zone avec clic gauche,
-                            puis relâche pour finaliser.
+                            puis relâche pour finaliser. Les zones rouges existantes peuvent aussi etre deplacees ou
+                            redimensionnees directement.
                           </p>
+                          <div className="mb-3 flex flex-wrap gap-3 text-[11px] text-slate-400">
+                            <span className="inline-flex items-center gap-2">
+                              <span className="h-3 w-3 rounded-sm border border-emerald-400 bg-emerald-400/20" />
+                              Zone de recherche
+                            </span>
+                            <span className="inline-flex items-center gap-2">
+                              <span className="h-3 w-3 rounded-sm border border-rose-400 bg-rose-400/15" />
+                              Zone de lecture OCR
+                            </span>
+                          </div>
                           <div
                             className="max-h-[75vh] overflow-auto overscroll-contain rounded border border-slate-900"
                           >
                             <div
+                              ref={calibrationCanvasRef}
                               className="relative inline-block cursor-crosshair select-none"
                               onDragStart={(event) => event.preventDefault()}
                               onPointerDown={beginOcrCalibrationSelection}
@@ -1914,6 +2206,128 @@ export default function Home() {
                                 draggable={false}
                                 className="block h-auto max-w-full rounded"
                               />
+                              {calibrationVisibleRegions.map(({ regionIndex, region, readingRect, searchRect }) => {
+                                const isSelected =
+                                  selectedOcrRegionIndex === regionIndex ||
+                                  activeOcrRegionEdit?.regionIndex === regionIndex;
+                                const handleClassName =
+                                  "pointer-events-auto absolute h-3 w-3 rounded-full border border-white bg-rose-500 shadow";
+                                return (
+                                <div key={`ocr-overlay-${regionIndex}`} className="pointer-events-none absolute inset-0">
+                                  <div
+                                    className="absolute border border-emerald-400/90 bg-emerald-400/15"
+                                    style={{
+                                      left: `${searchRect.leftPct}%`,
+                                      top: `${searchRect.topPct}%`,
+                                      width: `${searchRect.widthPct}%`,
+                                      height: `${searchRect.heightPct}%`,
+                                    }}
+                                  />
+                                  <div
+                                    className={`pointer-events-auto absolute border-2 ${
+                                      isSelected ? "border-sky-300 bg-rose-400/15" : "border-rose-400/95 bg-rose-400/10"
+                                    }`}
+                                    style={{
+                                      left: `${readingRect.leftPct}%`,
+                                      top: `${readingRect.topPct}%`,
+                                      width: `${readingRect.widthPct}%`,
+                                      height: `${readingRect.heightPct}%`,
+                                      cursor: activeOcrRegionEdit?.regionIndex === regionIndex ? "grabbing" : "grab",
+                                    }}
+                                    onPointerDown={(event) => {
+                                      beginOcrRegionEdit(
+                                        event,
+                                        regionIndex,
+                                        readingRect,
+                                        Math.max(0, region.margin_pct ?? 0),
+                                        "move",
+                                      );
+                                    }}
+                                  />
+                                  <div
+                                    className="absolute rounded bg-slate-950/90 px-1.5 py-0.5 text-[10px] font-medium text-slate-200 shadow"
+                                    style={{
+                                      left: `${readingRect.leftPct}%`,
+                                      top: `max(0px, calc(${readingRect.topPct}% - 20px))`,
+                                    }}
+                                  >
+                                    {region.name || `zone_${regionIndex + 1}`}
+                                  </div>
+                                  {isSelected ? (
+                                    <>
+                                      <div
+                                        className={handleClassName}
+                                        style={{
+                                          left: `calc(${readingRect.leftPct}% - 6px)`,
+                                          top: `calc(${readingRect.topPct}% - 6px)`,
+                                          cursor: "nwse-resize",
+                                        }}
+                                        onPointerDown={(event) => {
+                                          beginOcrRegionEdit(
+                                            event,
+                                            regionIndex,
+                                            readingRect,
+                                            Math.max(0, region.margin_pct ?? 0),
+                                            "nw",
+                                          );
+                                        }}
+                                      />
+                                      <div
+                                        className={handleClassName}
+                                        style={{
+                                          left: `calc(${readingRect.leftPct + readingRect.widthPct}% - 6px)`,
+                                          top: `calc(${readingRect.topPct}% - 6px)`,
+                                          cursor: "nesw-resize",
+                                        }}
+                                        onPointerDown={(event) => {
+                                          beginOcrRegionEdit(
+                                            event,
+                                            regionIndex,
+                                            readingRect,
+                                            Math.max(0, region.margin_pct ?? 0),
+                                            "ne",
+                                          );
+                                        }}
+                                      />
+                                      <div
+                                        className={handleClassName}
+                                        style={{
+                                          left: `calc(${readingRect.leftPct}% - 6px)`,
+                                          top: `calc(${readingRect.topPct + readingRect.heightPct}% - 6px)`,
+                                          cursor: "nesw-resize",
+                                        }}
+                                        onPointerDown={(event) => {
+                                          beginOcrRegionEdit(
+                                            event,
+                                            regionIndex,
+                                            readingRect,
+                                            Math.max(0, region.margin_pct ?? 0),
+                                            "sw",
+                                          );
+                                        }}
+                                      />
+                                      <div
+                                        className={handleClassName}
+                                        style={{
+                                          left: `calc(${readingRect.leftPct + readingRect.widthPct}% - 6px)`,
+                                          top: `calc(${readingRect.topPct + readingRect.heightPct}% - 6px)`,
+                                          cursor: "nwse-resize",
+                                        }}
+                                        onPointerDown={(event) => {
+                                          beginOcrRegionEdit(
+                                            event,
+                                            regionIndex,
+                                            readingRect,
+                                            Math.max(0, region.margin_pct ?? 0),
+                                            "se",
+                                          );
+                                        }}
+                                      />
+                                    </>
+                                  ) : null}
+                                </div>
+                                );
+                              })}
                               {ocrCalibrationDraft ? (
                                 <div
                                   className="pointer-events-none absolute border-2 border-emerald-400 bg-emerald-400/15"
@@ -2004,15 +2418,13 @@ export default function Home() {
                               </label>
                               <label className="text-xs text-slate-300">
                                 x %
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="100"
-                                  step="0.1"
+                                <DecimalInput
                                   value={region.x_pct}
-                                  onChange={(e) => {
+                                  min={0}
+                                  max={100}
+                                  onValueChange={(nextValue) => {
                                     const next = [...(guidedItemConfig.ocr_regions || [])];
-                                    next[idx] = { ...next[idx], x_pct: Number(e.target.value) };
+                                    next[idx] = { ...next[idx], x_pct: nextValue };
                                     setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
                                   }}
                                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
@@ -2020,15 +2432,13 @@ export default function Home() {
                               </label>
                               <label className="text-xs text-slate-300">
                                 y %
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="100"
-                                  step="0.1"
+                                <DecimalInput
                                   value={region.y_pct}
-                                  onChange={(e) => {
+                                  min={0}
+                                  max={100}
+                                  onValueChange={(nextValue) => {
                                     const next = [...(guidedItemConfig.ocr_regions || [])];
-                                    next[idx] = { ...next[idx], y_pct: Number(e.target.value) };
+                                    next[idx] = { ...next[idx], y_pct: nextValue };
                                     setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
                                   }}
                                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
@@ -2049,15 +2459,13 @@ export default function Home() {
                             <div className="mt-2 grid gap-2 sm:grid-cols-5">
                               <label className="text-xs text-slate-300">
                                 Largeur %
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="100"
-                                  step="0.1"
+                                <DecimalInput
                                   value={region.width_pct}
-                                  onChange={(e) => {
+                                  min={0}
+                                  max={100}
+                                  onValueChange={(nextValue) => {
                                     const next = [...(guidedItemConfig.ocr_regions || [])];
-                                    next[idx] = { ...next[idx], width_pct: Number(e.target.value) };
+                                    next[idx] = { ...next[idx], width_pct: nextValue };
                                     setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
                                   }}
                                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
@@ -2065,15 +2473,13 @@ export default function Home() {
                               </label>
                               <label className="text-xs text-slate-300">
                                 Hauteur %
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="100"
-                                  step="0.1"
+                                <DecimalInput
                                   value={region.height_pct}
-                                  onChange={(e) => {
+                                  min={0}
+                                  max={100}
+                                  onValueChange={(nextValue) => {
                                     const next = [...(guidedItemConfig.ocr_regions || [])];
-                                    next[idx] = { ...next[idx], height_pct: Number(e.target.value) };
+                                    next[idx] = { ...next[idx], height_pct: nextValue };
                                     setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
                                   }}
                                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
@@ -2081,15 +2487,13 @@ export default function Home() {
                               </label>
                               <label className="text-xs text-slate-300">
                                 Marge %
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="100"
-                                  step="0.1"
+                                <DecimalInput
                                   value={region.margin_pct ?? 2}
-                                  onChange={(e) => {
+                                  min={0}
+                                  max={100}
+                                  onValueChange={(nextValue) => {
                                     const next = [...(guidedItemConfig.ocr_regions || [])];
-                                    next[idx] = { ...next[idx], margin_pct: Number(e.target.value) };
+                                    next[idx] = { ...next[idx], margin_pct: nextValue };
                                     setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
                                   }}
                                   className="mt-1 h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
@@ -2129,17 +2533,15 @@ export default function Home() {
                               </label>
                               <label className="text-xs text-slate-300">
                                 Rayon recherche ancre %
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="100"
-                                  step="0.1"
+                                <DecimalInput
                                   value={region.anchor_search_radius_pct ?? 0}
-                                  onChange={(e) => {
+                                  min={0}
+                                  max={100}
+                                  onValueChange={(nextValue) => {
                                     const next = [...(guidedItemConfig.ocr_regions || [])];
                                     next[idx] = {
                                       ...next[idx],
-                                      anchor_search_radius_pct: Number(e.target.value),
+                                      anchor_search_radius_pct: nextValue,
                                     };
                                     setGuidedItemConfig({ ...guidedItemConfig, ocr_regions: next });
                                   }}

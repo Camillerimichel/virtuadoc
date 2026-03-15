@@ -44,3 +44,6 @@ next-env.d.ts
 __pycache__/
 *.pyc
 document_engine/.venv/
+
+# local working files
+tmp/
